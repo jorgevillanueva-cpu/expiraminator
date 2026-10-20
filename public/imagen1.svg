@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 400" width="100%" height="100%">
+  <!-- Dr. Heinz Doofenshmirtz -->
+  <g id="doofenshmirtz">
+    <!-- Body / Clothes -->
+    <!-- Black turtleneck shirt -->
+    <path d="M190 330 L260 350 L280 400 L180 400 Z" fill="#111111" />
+    <!-- White lab coat shoulder / collar -->
+    <path d="M250 340 L300 360 L300 400 L260 400 Z" fill="#FFFFFF" stroke="#D1D5DB" stroke-width="2" />
+    <path d="M245 350 L270 380 L255 400" fill="none" stroke="#9CA3AF" stroke-width="2" />
+
+    <!-- Neck -->
+    <path d="M185 285 L220 300 L205 345 L175 335 Z" fill="#F4BA90" stroke="#000000" stroke-width="3" stroke-linejoin="round" />
+
+    <!-- Head & Chin & Long Nose -->
+    <!-- Main head profile with jutting pointy chin and long pointy nose -->
+    <path d="
+      M 160 115
+      C 175 125, 205 145, 215 175
+      C 225 205, 220 225, 205 240
+      C 195 250, 180 255, 170 260
+      C 165 262, 168 275, 170 285
+      C 155 292, 130 295, 105 292
+      C 80 288, 70 270, 75 255
+      C 77 248, 85 240, 95 235
+      C 85 220, 60 215, 35 222
+      C 15 228, 5 235, 8 220
+      C 12 205, 35 195, 60 185
+      C 80 178, 100 170, 115 160
+      Z" 
+      fill="#F5BE94" stroke="#000000" stroke-width="4.5" stroke-linejoin="round" />
+
+    <!-- Mouth Line (characteristic smirk) -->
+    <path d="M 105 245 C 120 248, 140 250, 155 242" fill="none" stroke="#000000" stroke-width="3.5" stroke-linecap="round" />
+
+    <!-- Pointy Chin Detail -->
+    <path d="M 75 255 L 70 275 L 105 292" fill="none" stroke="#000000" stroke-width="3.5" />
+
+    <!-- Eyes -->
+    <!-- Left Eye (outer/background) -->
+    <ellipse cx="120" cy="180" rx="26" ry="32" fill="#FFFFFF" stroke="#000000" stroke-width="4" transform="rotate(-5 120 180)" />
+    <!-- Left Pupil -->
+    <ellipse cx="112" cy="165" rx="10" ry="14" fill="#1E293B" />
+    <circle cx="109" cy="160" r="3.5" fill="#FFFFFF" />
+
+    <!-- Right Eye (prominent front) -->
+    <ellipse cx="168" cy="188" rx="28" ry="35" fill="#FFFFFF" stroke="#000000" stroke-width="4" transform="rotate(8 168 188)" />
+    <!-- Right Pupil -->
+    <ellipse cx="158" cy="172" rx="11" ry="15" fill="#1E293B" />
+    <circle cx="155" cy="167" r="4" fill="#FFFFFF" />
+
+    <!-- Eye bags / lower lids -->
+    <path d="M 100 205 C 115 215, 135 212, 145 200" fill="none" stroke="#8C4E32" stroke-width="3" stroke-linecap="round" />
+    <path d="M 148 215 C 165 225, 185 220, 195 205" fill="none" stroke="#8C4E32" stroke-width="3" stroke-linecap="round" />
+
+    <!-- Eyebrow (Expressive arched black) -->
+    <path d="M 170 148 C 185 138, 202 145, 208 160 C 200 152, 185 150, 172 153 Z" fill="#000000" />
+
+    <!-- Ear -->
+    <path d="M 210 215 C 225 212, 235 225, 230 238 C 225 248, 215 252, 205 245 Z" fill="#F4BA90" stroke="#000000" stroke-width="3.5" />
+    <path d="M 215 225 C 222 228, 222 235, 216 238" fill="none" stroke="#B45309" stroke-width="2.5" />
+
+    <!-- Hair (Spiky Brown Heinz hair) -->
+    <path d="
+      M 115 155
+      C 105 130, 85 95, 125 75
+      C 145 65, 155 35, 170 15
+      C 178 35, 185 55, 195 65
+      C 215 50, 230 45, 245 60
+      C 255 75, 250 100, 240 115
+      C 255 105, 275 110, 270 135
+      C 265 155, 240 160, 220 165
+      C 225 140, 205 135, 195 138
+      C 190 120, 170 120, 160 130
+      C 145 110, 125 130, 120 148
+      Z" 
+      fill="#78350F" stroke="#000000" stroke-width="4.5" stroke-linejoin="round" />
+
+    <!-- Hair Tuft strands -->
+    <path d="M 160 50 C 170 30, 180 35, 185 60" fill="none" stroke="#000000" stroke-width="3" />
+    <path d="M 220 70 C 235 60, 245 70, 242 90" fill="none" stroke="#000000" stroke-width="3" />
+  </g>
+</svg>

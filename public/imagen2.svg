@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 300" width="100%" height="100%">
+  <!-- Agent P / Perry the Platypus -->
+  <defs>
+    <clipPath id="squircleClip">
+      <rect x="0" y="0" width="300" height="300" rx="36" ry="36" />
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#squircleClip)">
+    <!-- Teal / Cyan Background (Perry's fur color) -->
+    <rect width="300" height="300" fill="#3AA8B0" />
+
+    <!-- Fedora Hat -->
+    <!-- Crown -->
+    <path d="
+      M 85 105
+      C 80 65, 110 25, 150 20
+      C 190 25, 220 65, 215 105
+      Z" 
+      fill="#6B532F" stroke="#1C1408" stroke-width="6.5" stroke-linejoin="round" />
+
+    <!-- Hat crease / shadow top -->
+    <path d="M 125 35 C 150 50, 160 50, 175 35" fill="none" stroke="#48371C" stroke-width="4.5" stroke-linecap="round" />
+
+    <!-- Hat Band (Dark) -->
+    <path d="
+      M 79 107
+      C 115 100, 185 100, 221 107
+      L 223 90
+      C 185 83, 115 83, 77 90
+      Z" 
+      fill="#261E14" stroke="#1C1408" stroke-width="5" stroke-linejoin="round" />
+
+    <!-- Hat Brim (Wide curving down on sides) -->
+    <path d="
+      M 15 125
+      C 55 105, 105 100, 150 100
+      C 195 100, 245 105, 285 125
+      C 292 135, 280 145, 255 142
+      C 200 135, 100 135, 45 142
+      C 20 145, 8 135, 15 125
+      Z" 
+      fill="#6B532F" stroke="#1C1408" stroke-width="7" stroke-linejoin="round" />
+
+    <!-- Eyes (Agent determined glare) -->
+    <!-- Left Eye White -->
+    <path d="
+      M 65 145
+      C 85 142, 125 142, 138 152
+      C 142 165, 135 188, 115 192
+      C 95 195, 70 190, 62 175
+      C 58 162, 60 150, 65 145
+      Z" 
+      fill="#FFFFFF" stroke="#1C1408" stroke-width="6.5" stroke-linejoin="round" />
+
+    <!-- Left Pupil -->
+    <ellipse cx="108" cy="168" rx="16" ry="17" fill="#452718" stroke="#1C1408" stroke-width="3" />
+    <circle cx="114" cy="163" r="4.5" fill="#FFFFFF" />
+
+    <!-- Right Eye White -->
+    <path d="
+      M 235 145
+      C 215 142, 175 142, 162 152
+      C 158 165, 165 188, 185 192
+      C 205 195, 230 190, 238 175
+      C 242 162, 240 150, 235 145
+      Z" 
+      fill="#FFFFFF" stroke="#1C1408" stroke-width="6.5" stroke-linejoin="round" />
+
+    <!-- Right Pupil -->
+    <ellipse cx="192" cy="168" rx="16" ry="17" fill="#452718" stroke="#1C1408" stroke-width="3" />
+    <circle cx="186" cy="163" r="4.5" fill="#FFFFFF" />
+
+    <!-- Determined Eyebrows / Eyelid Shadow under Brim -->
+    <path d="M 60 148 C 90 140, 125 145, 142 155" fill="none" stroke="#1C1408" stroke-width="7" stroke-linecap="round" />
+    <path d="M 240 148 C 210 140, 175 145, 158 155" fill="none" stroke="#1C1408" stroke-width="7" stroke-linecap="round" />
+
+    <!-- Orange / Yellow Duck Bill -->
+    <path d="
+      M 150 145
+      C 142 158, 130 175, 110 182
+      C 80 185, 60 195, 65 208
+      C 75 225, 120 238, 150 238
+      C 180 238, 225 225, 235 208
+      C 240 195, 220 185, 190 182
+      C 170 175, 158 158, 150 145
+      Z" 
+      fill="#F2B02A" stroke="#C97E12" stroke-width="6" stroke-linejoin="round" />
+
+    <!-- Bill Mouth Line / Dimple -->
+    <path d="M 85 205 C 120 215, 180 215, 215 205" fill="none" stroke="#9A5907" stroke-width="3.5" stroke-linecap="round" />
+
+    <!-- Outer Bill contour outline for comic book crispness -->
+    <path d="
+      M 150 145
+      C 142 158, 130 175, 110 182
+      C 80 185, 60 195, 65 208
+      C 75 225, 120 238, 150 238
+      C 180 238, 225 225, 235 208
+      C 240 195, 220 185, 190 182
+      C 170 175, 158 158, 150 145
+      Z" 
+      fill="none" stroke="#1C1408" stroke-width="5" stroke-linejoin="round" />
+  </g>
+</svg>

@@ -1,0 +1,56 @@
+{
+  "entities": {
+    "Terminal": {
+      "title": "Terminal",
+      "description": "Operating POS terminal mapping serial number to Store ID",
+      "type": "object",
+      "properties": {
+        "serialNumber": {
+          "type": "string",
+          "description": "Terminal serial number from column C",
+          "maxLength": 100
+        },
+        "storeId": {
+          "type": "string",
+          "description": "Store ID from column D",
+          "maxLength": 100
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "ISO timestamp of last update"
+        }
+      },
+      "required": ["serialNumber", "storeId"]
+    },
+    "Reconciliation": {
+      "title": "Reconciliation",
+      "description": "Summary metadata of a reconciliation run",
+      "type": "object",
+      "properties": {
+        "matchedCount": {
+          "type": "number",
+          "description": "Count of matched transactions"
+        },
+        "expiredWithChargeCount": {
+          "type": "number",
+          "description": "Count of expired orders with charge"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Timestamp of reconciliation"
+        }
+      },
+      "required": ["matchedCount", "expiredWithChargeCount"]
+    }
+  },
+  "firestore": {
+    "/terminals/{terminalId}": {
+      "schema": "#/entities/Terminal",
+      "description": "Terminals database storing serialNumber and storeId"
+    },
+    "/reconciliations/{reconciliationId}": {
+      "schema": "#/entities/Reconciliation",
+      "description": "Reconciliation execution logs and summaries"
+    }
+  }
+}

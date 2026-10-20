@@ -1,0 +1,47 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default-deny all unspecified paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() > 0 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidTerminal(data) {
+      return data.keys().hasAll(['serialNumber', 'storeId'])
+        && data.keys().hasOnly(['serialNumber', 'storeId', 'updatedAt', 'notes', 'status'])
+        && data.serialNumber is string && data.serialNumber.size() > 0 && data.serialNumber.size() <= 100
+        && data.storeId is string && data.storeId.size() > 0 && data.storeId.size() <= 100;
+    }
+
+    function isValidReconciliation(data) {
+      return data.keys().hasAll(['matchedCount', 'expiredWithChargeCount'])
+        && data.matchedCount is number && data.matchedCount >= 0
+        && data.expiredWithChargeCount is number && data.expiredWithChargeCount >= 0;
+    }
+
+    // Ping / connection test document
+    match /test/connection {
+      allow read: if true;
+    }
+
+    // Terminals catalog
+    match /terminals/{terminalId} {
+      allow get: if isValidId(terminalId);
+      allow list: if true;
+      allow create, update: if isValidId(terminalId) && isValidTerminal(request.resource.data);
+      allow delete: if isValidId(terminalId);
+    }
+
+    // Reconciliation history
+    match /reconciliations/{reconciliationId} {
+      allow get: if isValidId(reconciliationId);
+      allow list: if true;
+      allow create, update: if isValidId(reconciliationId) && isValidReconciliation(request.resource.data);
+      allow delete: if isValidId(reconciliationId);
+    }
+  }
+}
