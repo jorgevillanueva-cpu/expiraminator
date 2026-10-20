@@ -4,8 +4,8 @@ import { ExpiraminatorLogo } from './ExpiraminatorLogo';
 
 interface HeaderProps {
   terminalCount: number;
-  activeTab: 'reconciliation' | 'terminals' | 'samples';
-  setActiveTab: (tab: 'reconciliation' | 'terminals' | 'samples') => void;
+  activeTab: 'reconciliation' | 'terminals';
+  setActiveTab: (tab: 'reconciliation' | 'terminals') => void;
   isLoadingTerminals: boolean;
   onRefreshTerminals: () => void;
   realtimeStatus?: {
@@ -32,7 +32,7 @@ export const Header: React.FC<HeaderProps> = ({
           <div>
             <div className="flex items-center gap-2">
               <h1 className="text-xl font-extrabold tracking-tight text-slate-900 font-mono">
-                Expiraminator
+                EXPIRAMINATOR
               </h1>
               <span className="px-2 py-0.5 text-[11px] font-bold bg-rose-50 text-rose-600 border border-rose-200 rounded-full">
                 Cotejo en Tiempo Real
@@ -50,24 +50,8 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         </div>
 
-        {/* Navigation Tabs & Firebase Status */}
+        {/* Navigation Tabs */}
         <div className="flex items-center gap-3 flex-wrap">
-          {/* Base Terminals Status Pill */}
-          <button
-            onClick={() => setActiveTab('terminals')}
-            className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all ${
-              activeTab === 'terminals'
-                ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm'
-                : 'bg-slate-50 text-slate-700 border-slate-200 hover:bg-slate-100 hover:text-slate-900'
-            }`}
-            title="Ver catálogo de terminales en Firebase Firestore"
-          >
-            <Database className="w-3.5 h-3.5 text-indigo-500 group-hover:text-white" />
-            <span>Terminales en Firebase:</span>
-            <span className="px-1.5 py-0.2 bg-white text-indigo-700 rounded font-mono font-bold shadow-2xs border border-indigo-100">
-              {isLoadingTerminals ? '...' : terminalCount}
-            </span>
-          </button>
 
           {/* Nav Tabs */}
           <div className="bg-slate-100 p-1 rounded-xl border border-slate-200 flex items-center gap-1 text-xs">
@@ -89,17 +73,7 @@ export const Header: React.FC<HeaderProps> = ({
                   : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/50'
               }`}
             >
-              Base de Terminales
-            </button>
-            <button
-              onClick={() => setActiveTab('samples')}
-              className={`px-3 py-1.5 rounded-lg font-bold transition-all ${
-                activeTab === 'samples'
-                  ? 'bg-white text-rose-600 shadow-xs border border-slate-200/80'
-                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200/50'
-              }`}
-            >
-              Plantillas de Prueba
+              Base de Terminales {terminalCount > 0 ? `(${terminalCount})` : ''}
             </button>
           </div>
 
@@ -107,7 +81,7 @@ export const Header: React.FC<HeaderProps> = ({
             onClick={onRefreshTerminals}
             disabled={isLoadingTerminals}
             className="p-1.5 rounded-lg bg-white hover:bg-slate-100 text-slate-600 hover:text-slate-900 border border-slate-200 shadow-2xs transition"
-            title="Recargar terminales desde Firestore"
+            title="Recargar base de terminales"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isLoadingTerminals ? 'animate-spin' : ''}`} />
           </button>

@@ -1,5 +1,5 @@
 {
-  "name": "Expiraminator",
+  "name": "EXPIRAMINATOR",
   "description": "Sistema de cotejo y cruce de archivos de transacciones, órdenes generadas y órdenes expiradas para detección de cobros no correspondientes.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]

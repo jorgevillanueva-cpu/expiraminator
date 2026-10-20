@@ -117,6 +117,7 @@ export function parseGeneratedOrdersFile(rows: any[][]): GeneratedOrderRecord[] 
     const cardEnding = extractCardLast4(cardRaw);
     const authCode = normalizeAuthCode(authCodeRaw);
     const terminalSerial = String(terminalSerialRaw || '').trim();
+    const totalAmount = extractAmount(row[7]); // Columna H (index 7) - Total Órdenes Yoshi
 
     records.push({
       rowNumber: i + 1,
@@ -127,6 +128,7 @@ export function parseGeneratedOrdersFile(rows: any[][]): GeneratedOrderRecord[] 
       timeStr: parsedTime ? parsedTime.formatted : '',
       timeSeconds: parsedTime ? parsedTime.seconds : -1,
       terminalSerial,
+      totalAmount,
     });
   }
   return records;
@@ -354,29 +356,34 @@ export function performReconciliation(
       const baseAmt = exp.baseAmount; // Col G
       const totalAmt = exp.totalAmount; // Col H
 
-      // El incremento del 5%, 10%, 15%, 20% se coteja contra Col H (Total) y Col G (Base)
-      const refAmt = totalAmt > 0 ? totalAmt : baseAmt;
+      // El cotejo se realiza contra Archivo 3 Columna H (monto base / total de la orden expirada):
+      // Primero se verifica si coincide exacto (0%).
+      // Si no coincide, se aumenta el 5% y se verifica de nuevo.
+      // Si no coincide, se aumenta el 10% y se verifica de nuevo.
+      // Si no coincide, se aumenta el 15% y se verifica de nuevo.
+      // Si no coincide, se aumenta el 20% y se verifica de nuevo.
+      const valH = totalAmt > 0 ? totalAmt : baseAmt;
 
       const candidates: Array<{
         type: PossibleExpiredChargeResult['marginType'];
         label: string;
         expected: number;
       }> = [
-        { type: 'plus_5', label: '+5% sobre Col H', expected: Math.round(refAmt * 1.05 * 100) / 100 },
-        { type: 'plus_10', label: '+10% sobre Col H', expected: Math.round(refAmt * 1.10 * 100) / 100 },
-        { type: 'plus_15', label: '+15% sobre Col H', expected: Math.round(refAmt * 1.15 * 100) / 100 },
-        { type: 'plus_20', label: '+20% sobre Col H', expected: Math.round(refAmt * 1.20 * 100) / 100 },
-        { type: 'total_exact', label: 'Total Exacto (Col H)', expected: totalAmt },
-        { type: 'base_exact', label: 'Monto Base Exacto (Col G)', expected: baseAmt },
+        { type: 'total_exact', label: `Exacto Col H ($${valH.toFixed(2)})`, expected: Math.round(valH * 100) / 100 },
+        { type: 'plus_5', label: `+5% (Posible Propina) sobre Col H ($${(valH * 1.05).toFixed(2)})`, expected: Math.round(valH * 1.05 * 100) / 100 },
+        { type: 'plus_10', label: `+10% (Posible Propina) sobre Col H ($${(valH * 1.10).toFixed(2)})`, expected: Math.round(valH * 1.10 * 100) / 100 },
+        { type: 'plus_15', label: `+15% (Posible Propina) sobre Col H ($${(valH * 1.15).toFixed(2)})`, expected: Math.round(valH * 1.15 * 100) / 100 },
+        { type: 'plus_20', label: `+20% (Posible Propina) sobre Col H ($${(valH * 1.20).toFixed(2)})`, expected: Math.round(valH * 1.20 * 100) / 100 },
       ];
 
-      // Si baseAmt es distinto de refAmt, también evaluamos márgenes sobre Col G
-      if (baseAmt > 0 && Math.abs(baseAmt - refAmt) > 0.01) {
+      // Si baseAmt es distinto de valH y > 0, también evaluamos la escala sobre Col G
+      if (baseAmt > 0 && Math.abs(baseAmt - valH) > 0.01) {
         candidates.push(
-          { type: 'plus_5', label: '+5% sobre Col G', expected: Math.round(baseAmt * 1.05 * 100) / 100 },
-          { type: 'plus_10', label: '+10% sobre Col G', expected: Math.round(baseAmt * 1.10 * 100) / 100 },
-          { type: 'plus_15', label: '+15% sobre Col G', expected: Math.round(baseAmt * 1.15 * 100) / 100 },
-          { type: 'plus_20', label: '+20% sobre Col G', expected: Math.round(baseAmt * 1.20 * 100) / 100 }
+          { type: 'base_exact', label: `Exacto Col G ($${baseAmt.toFixed(2)})`, expected: Math.round(baseAmt * 100) / 100 },
+          { type: 'plus_5', label: `+5% (Posible Propina) sobre Col G ($${(baseAmt * 1.05).toFixed(2)})`, expected: Math.round(baseAmt * 1.05 * 100) / 100 },
+          { type: 'plus_10', label: `+10% (Posible Propina) sobre Col G ($${(baseAmt * 1.10).toFixed(2)})`, expected: Math.round(baseAmt * 1.10 * 100) / 100 },
+          { type: 'plus_15', label: `+15% (Posible Propina) sobre Col G ($${(baseAmt * 1.15).toFixed(2)})`, expected: Math.round(baseAmt * 1.15 * 100) / 100 },
+          { type: 'plus_20', label: `+20% (Posible Propina) sobre Col G ($${(baseAmt * 1.20).toFixed(2)})`, expected: Math.round(baseAmt * 1.20 * 100) / 100 }
         );
       }
 
@@ -390,7 +397,7 @@ export function performReconciliation(
         }
       }
 
-      // If tx.amount is 0 (amount wasn't detected in standard columns) or matches candidate
+      // Si tx.amount coincide con el candidato (o tx.amount es 0 con hora coincidente)
       if (matchedCandidate || (tx.amount === 0 && timeMatches)) {
         usedExpiredIndices.add(k);
 
@@ -407,7 +414,8 @@ export function performReconciliation(
           horaArchivo1: tx.timeStr,
           horaArchivo3: exp.timeStr,
           montoArchivo1: tx.amount,
-          montoArchivo3Total: exp.totalAmount,
+          montoArchivo2Total: 0,
+          montoArchivo3Total: exp.totalAmount > 0 ? exp.totalAmount : exp.baseAmount,
           montoArchivo3Base: exp.baseAmount,
           storeIdArchivo1: tx.storeId,
           concesionArchivo3: exp.concession,
@@ -735,27 +743,27 @@ export async function performReconciliationStreaming(
 
         const baseAmt = exp.baseAmount;
         const totalAmt = exp.totalAmount;
-        const refAmt = totalAmt > 0 ? totalAmt : baseAmt;
+        const valH = totalAmt > 0 ? totalAmt : baseAmt;
 
         const candidates: Array<{
           type: PossibleExpiredChargeResult['marginType'];
           label: string;
           expected: number;
         }> = [
-          { type: 'plus_5' as const, label: '+5% sobre Col H', expected: Math.round(refAmt * 1.05 * 100) / 100 },
-          { type: 'plus_10' as const, label: '+10% sobre Col H', expected: Math.round(refAmt * 1.10 * 100) / 100 },
-          { type: 'plus_15' as const, label: '+15% sobre Col H', expected: Math.round(refAmt * 1.15 * 100) / 100 },
-          { type: 'plus_20' as const, label: '+20% sobre Col H', expected: Math.round(refAmt * 1.20 * 100) / 100 },
-          { type: 'total_exact' as const, label: 'Total Exacto (Col H)', expected: totalAmt },
-          { type: 'base_exact' as const, label: 'Monto Base Exacto (Col G)', expected: baseAmt },
+          { type: 'total_exact' as const, label: `Exacto Col H ($${valH.toFixed(2)})`, expected: Math.round(valH * 100) / 100 },
+          { type: 'plus_5' as const, label: `+5% (Posible Propina) sobre Col H ($${(valH * 1.05).toFixed(2)})`, expected: Math.round(valH * 1.05 * 100) / 100 },
+          { type: 'plus_10' as const, label: `+10% (Posible Propina) sobre Col H ($${(valH * 1.10).toFixed(2)})`, expected: Math.round(valH * 1.10 * 100) / 100 },
+          { type: 'plus_15' as const, label: `+15% (Posible Propina) sobre Col H ($${(valH * 1.15).toFixed(2)})`, expected: Math.round(valH * 1.15 * 100) / 100 },
+          { type: 'plus_20' as const, label: `+20% (Posible Propina) sobre Col H ($${(valH * 1.20).toFixed(2)})`, expected: Math.round(valH * 1.20 * 100) / 100 },
         ];
 
-        if (baseAmt > 0 && Math.abs(baseAmt - refAmt) > 0.01) {
+        if (baseAmt > 0 && Math.abs(baseAmt - valH) > 0.01) {
           candidates.push(
-            { type: 'plus_5' as const, label: '+5% sobre Col G', expected: Math.round(baseAmt * 1.05 * 100) / 100 },
-            { type: 'plus_10' as const, label: '+10% sobre Col G', expected: Math.round(baseAmt * 1.10 * 100) / 100 },
-            { type: 'plus_15' as const, label: '+15% sobre Col G', expected: Math.round(baseAmt * 1.15 * 100) / 100 },
-            { type: 'plus_20' as const, label: '+20% sobre Col G', expected: Math.round(baseAmt * 1.20 * 100) / 100 }
+            { type: 'base_exact' as const, label: `Exacto Col G ($${baseAmt.toFixed(2)})`, expected: Math.round(baseAmt * 100) / 100 },
+            { type: 'plus_5' as const, label: `+5% (Posible Propina) sobre Col G ($${(baseAmt * 1.05).toFixed(2)})`, expected: Math.round(baseAmt * 1.05 * 100) / 100 },
+            { type: 'plus_10' as const, label: `+10% (Posible Propina) sobre Col G ($${(baseAmt * 1.10).toFixed(2)})`, expected: Math.round(baseAmt * 1.10 * 100) / 100 },
+            { type: 'plus_15' as const, label: `+15% (Posible Propina) sobre Col G ($${(baseAmt * 1.15).toFixed(2)})`, expected: Math.round(baseAmt * 1.15 * 100) / 100 },
+            { type: 'plus_20' as const, label: `+20% (Posible Propina) sobre Col G ($${(baseAmt * 1.20).toFixed(2)})`, expected: Math.round(baseAmt * 1.20 * 100) / 100 }
           );
         }
 
@@ -789,7 +797,8 @@ export async function performReconciliationStreaming(
             horaArchivo1: tx.timeStr,
             horaArchivo3: exp.timeStr,
             montoArchivo1: tx.amount,
-            montoArchivo3Total: exp.totalAmount,
+            montoArchivo2Total: 0,
+            montoArchivo3Total: exp.totalAmount > 0 ? exp.totalAmount : exp.baseAmount,
             montoArchivo3Base: exp.baseAmount,
             storeIdArchivo1: tx.storeId,
             concesionArchivo3: exp.concession,
@@ -912,21 +921,21 @@ export function exportPossibleExpiredChargesToExcel(
   reportTitle: string = 'POSIBLES EXPIRADAS CON COBRO'
 ): void {
   const exportData = results.map((item) => ({
-    'Hora Archivo 1 (Transacción Col D)': item.horaArchivo1,
-    'Hora Archivo 3 (Expirada Col A)': item.horaArchivo3,
+    'Hora Archivo 1 SPIN (Col D)': item.horaArchivo1,
+    'Hora Archivo 3 Expiradas (Col A)': item.horaArchivo3,
     'Dif. Tiempo': item.timeDiffFormatted,
-    'Monto Archivo 1': item.montoArchivo1,
-    'Monto Archivo 3 (Total Col H)': item.montoArchivo3Total,
-    'Monto Archivo 3 (Base Col G)': item.montoArchivo3Base,
+    'Monto Cobrado Archivo 1 SPIN (Col E)': item.montoArchivo1,
+    'Monto Total Archivo 2 Yoshi (Col H)': item.montoArchivo2Total || 0,
+    'Monto Base / Total Archivo 3 Expiradas (Col H)': item.montoArchivo3Total,
     'Aumento / Margen Detectado': item.marginLabel,
-    'Store ID (Archivo 1 Col P)': item.storeIdArchivo1,
-    'Concesión (Archivo 3 Col B)': item.concesionArchivo3,
-    'Código (Archivo 3 Col C)': item.codigoArchivo3,
-    'Vendedor (Archivo 3 Col E)': item.vendedorArchivo3,
-    'Terminación Tarjeta (Archivo 1 Col S)': item.terminacionTarjetaArchivo1,
-    'Código Autorización (Archivo 1 Col Y)': item.codigoAutorizacionArchivo1,
-    'Estatus Col I (Archivo 1)': item.estatusIArchivo1,
-    'Estatus Col L (Archivo 1)': item.estatusLArchivo1,
+    'Store ID (Archivo 1 SPIN Col P)': item.storeIdArchivo1,
+    'Concesión (Archivo 3 Expiradas Col B)': item.concesionArchivo3,
+    'Código (Archivo 3 Expiradas Col C)': item.codigoArchivo3,
+    'Vendedor (Archivo 3 Expiradas Col E)': item.vendedorArchivo3,
+    'Terminación Tarjeta (Archivo 1 SPIN Col S)': item.terminacionTarjetaArchivo1,
+    'Código Autorización (Archivo 1 SPIN Col Y)': item.codigoAutorizacionArchivo1,
+    'Estatus Col I (Archivo 1 SPIN)': item.estatusIArchivo1,
+    'Estatus Col L (Archivo 1 SPIN)': item.estatusLArchivo1,
   }));
 
   const worksheet = XLSX.utils.json_to_sheet(exportData);
@@ -936,9 +945,9 @@ export function exportPossibleExpiredChargesToExcel(
     { wch: 22 }, // Hora A1
     { wch: 22 }, // Hora A3
     { wch: 16 }, // Dif tiempo
-    { wch: 16 }, // Monto A1
-    { wch: 18 }, // Monto A3 Total
-    { wch: 18 }, // Monto A3 Base
+    { wch: 20 }, // Monto A1
+    { wch: 20 }, // Monto A2
+    { wch: 22 }, // Monto A3
     { wch: 24 }, // Margen
     { wch: 20 }, // Store ID
     { wch: 24 }, // Concesión
@@ -972,21 +981,21 @@ export function exportUnmatchedApprovedToExcel(
   const exportData = unmatchedList.map((tx) => {
     const match = expiredMatchesMap.get(tx.rowNumber);
     return {
-      'Hora Archivo 1 (Transacción Col D)': tx.timeStr,
-      'Hora Archivo 3 (Expirada Col A)': match ? match.horaArchivo3 : '— (Sin orden coincidente)',
+      'Hora Archivo 1 SPIN (Col D)': tx.timeStr,
+      'Hora Archivo 3 Expiradas (Col A)': match ? match.horaArchivo3 : '— (Sin orden coincidente)',
       'Dif. Tiempo': match ? match.timeDiffFormatted : '—',
-      'Monto Archivo 1': tx.amount,
-      'Monto Archivo 3 (Total Col H)': match ? match.montoArchivo3Total : 0,
-      'Monto Archivo 3 (Base Col G)': match ? match.montoArchivo3Base : 0,
+      'Monto Cobrado Archivo 1 SPIN (Col E)': tx.amount,
+      'Monto Total Archivo 2 Yoshi (Col H)': 0,
+      'Monto Base / Total Archivo 3 Expiradas (Col H)': match ? match.montoArchivo3Total : 0,
       'Aumento / Margen Detectado': match ? match.marginLabel : 'Sin Coincidencia en A3',
-      'Store ID (Archivo 1 Col P)': tx.storeId,
-      'Concesión (Archivo 3 Col B)': match ? match.concesionArchivo3 : '—',
-      'Código (Archivo 3 Col C)': match ? match.codigoArchivo3 : '—',
-      'Vendedor (Archivo 3 Col E)': match ? match.vendedorArchivo3 : '—',
-      'Terminación Tarjeta (Archivo 1 Col S)': tx.cardEnding,
-      'Código Autorización (Archivo 1 Col Y)': tx.authCode,
-      'Estatus Col I (Archivo 1)': tx.statusI,
-      'Estatus Col L (Archivo 1)': tx.statusL,
+      'Store ID (Archivo 1 SPIN Col P)': tx.storeId,
+      'Concesión (Archivo 3 Expiradas Col B)': match ? match.concesionArchivo3 : '—',
+      'Código (Archivo 3 Expiradas Col C)': match ? match.codigoArchivo3 : '—',
+      'Vendedor (Archivo 3 Expiradas Col E)': match ? match.vendedorArchivo3 : '—',
+      'Terminación Tarjeta (Archivo 1 SPIN Col S)': tx.cardEnding,
+      'Código Autorización (Archivo 1 SPIN Col Y)': tx.authCode,
+      'Estatus Col I (Archivo 1 SPIN)': tx.statusI,
+      'Estatus Col L (Archivo 1 SPIN)': tx.statusL,
     };
   });
 
@@ -996,9 +1005,9 @@ export function exportUnmatchedApprovedToExcel(
     { wch: 22 }, // Hora A1
     { wch: 24 }, // Hora A3
     { wch: 16 }, // Dif tiempo
-    { wch: 16 }, // Monto A1
-    { wch: 18 }, // Monto A3 Total
-    { wch: 18 }, // Monto A3 Base
+    { wch: 20 }, // Monto A1
+    { wch: 20 }, // Monto A2
+    { wch: 22 }, // Monto A3
     { wch: 24 }, // Margen
     { wch: 20 }, // Store ID
     { wch: 24 }, // Concesión

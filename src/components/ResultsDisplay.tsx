@@ -100,6 +100,7 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
         horaArchivo1: tx.timeStr,
         horaArchivo3: '— (Sin orden expirada)',
         montoArchivo1: tx.amount,
+        montoArchivo2Total: 0,
         montoArchivo3Total: 0,
         montoArchivo3Base: 0,
         storeIdArchivo1: tx.storeId,
@@ -468,10 +469,10 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                 <option value="all">Todas ({unmatchedApproved.length})</option>
                 <option value="with_expired">Con orden expirada coincidente ({possibleExpiredCharges.length})</option>
                 <option value="without_expired">Sin orden expirada coincidente ({Math.max(0, unmatchedApproved.length - possibleExpiredCharges.length)})</option>
-                <option value="plus_5">+5% sobre Monto Base</option>
-                <option value="plus_10">+10% sobre Monto Base</option>
-                <option value="plus_15">+15% sobre Monto Base</option>
-                <option value="plus_20">+20% sobre Monto Base</option>
+                <option value="plus_5">+5% (Posible Propina)</option>
+                <option value="plus_10">+10% (Posible Propina)</option>
+                <option value="plus_15">+15% (Posible Propina)</option>
+                <option value="plus_20">+20% (Posible Propina)</option>
                 <option value="total_exact">Total Exacto (Col H)</option>
                 <option value="base_exact">Monto Base Exacto (Col H)</option>
               </select>
@@ -480,17 +481,17 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
 
           {subTab === 'expired_charges' && (
             <div className="flex items-center gap-2 self-start sm:self-auto">
-              <span className="text-slate-500 text-[11px] font-semibold">Margen de aumento:</span>
+              <span className="text-slate-500 text-[11px] font-semibold">Margen / Propina:</span>
               <select
                 value={filterMargin}
                 onChange={(e) => setFilterMargin(e.target.value)}
                 className="bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs text-slate-700 font-medium focus:outline-none focus:border-rose-500"
               >
-                <option value="all">Todos los aumentos (+5%, +10%, +15%, +20%, Total)</option>
-                <option value="plus_5">+5% sobre Monto Base</option>
-                <option value="plus_10">+10% sobre Monto Base</option>
-                <option value="plus_15">+15% sobre Monto Base</option>
-                <option value="plus_20">+20% sobre Monto Base</option>
+                <option value="all">Todos los márgenes / propinas (+5%, +10%, +15%, +20%, Total)</option>
+                <option value="plus_5">+5% (Posible Propina)</option>
+                <option value="plus_10">+10% (Posible Propina)</option>
+                <option value="plus_15">+15% (Posible Propina)</option>
+                <option value="plus_20">+20% (Posible Propina)</option>
                 <option value="total_exact">Total Exacto (Col H)</option>
                 <option value="base_exact">Monto Base Exacto (Col H)</option>
               </select>
@@ -508,14 +509,20 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                   <strong>Visualización en Pantalla:</strong> Registros coincidentes de Transacciones (SPIN) vs Órdenes (Excel detallado pagos) con estatus Aprobadas en Columnas I y L.
                 </span>
               </div>
-              <span className="font-mono font-bold bg-white px-2.5 py-1 rounded-lg border border-emerald-200 text-emerald-700 shadow-2xs">
-                {matchedWithOrders.length} coincidentes
-              </span>
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] text-slate-500 font-mono font-medium bg-white px-2 py-0.5 rounded border border-emerald-200">
+                  ↕ Recuadro deslizable
+                </span>
+                <span className="font-mono font-bold bg-white px-2.5 py-1 rounded-lg border border-emerald-200 text-emerald-700 shadow-2xs">
+                  {matchedWithOrders.length} coincidentes
+                </span>
+              </div>
             </div>
 
-            <div className="overflow-x-auto">
+            {/* Recuadro con barra deslizadora */}
+            <div className="overflow-x-auto overflow-y-auto max-h-[540px] border border-slate-200 bg-white rounded-b-2xl shadow-inner scrollbar-thin">
               <table className="w-full text-left text-xs">
-                <thead className="bg-slate-50 text-slate-500 uppercase font-mono tracking-wider border-b border-slate-200 text-[10px] font-bold">
+                <thead className="sticky top-0 z-10 bg-slate-100/95 backdrop-blur-xs text-slate-700 uppercase font-mono tracking-wider border-b border-slate-200 text-[10px] font-bold shadow-2xs">
                   <tr>
                     <th className="py-3 px-3">#</th>
                     <th className="py-3 px-3">
@@ -604,14 +611,20 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                   <strong>Aprobadas Restantes (Sin Orden en A2):</strong> Transacciones de SPIN (Archivo 1) con estatus Aprobadas (Cols I y L) de terminales activas que no generaron orden de venta en Archivo 2, cotejadas con Archivo 3 (Expiradas).
                 </span>
               </div>
-              <span className="font-mono font-bold bg-white px-2.5 py-1 rounded-lg border border-amber-300 text-amber-800 shadow-2xs">
-                {unmatchedApproved.length} transacciones
-              </span>
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] text-slate-500 font-mono font-medium bg-white px-2 py-0.5 rounded border border-amber-300">
+                  ↕ Recuadro deslizable
+                </span>
+                <span className="font-mono font-bold bg-white px-2.5 py-1 rounded-lg border border-amber-300 text-amber-800 shadow-2xs">
+                  {unmatchedApproved.length} transacciones
+                </span>
+              </div>
             </div>
 
-            <div className="overflow-x-auto">
+            {/* Recuadro con barra deslizadora */}
+            <div className="overflow-x-auto overflow-y-auto max-h-[540px] border border-slate-200 bg-white rounded-b-2xl shadow-inner scrollbar-thin">
               <table className="w-full text-left text-xs">
-                <thead className="bg-slate-50 text-slate-500 uppercase font-mono tracking-wider border-b border-slate-200 text-[10px] font-bold">
+                <thead className="sticky top-0 z-10 bg-slate-100/95 backdrop-blur-xs text-slate-700 uppercase font-mono tracking-wider border-b border-slate-200 text-[10px] font-bold shadow-2xs">
                   <tr>
                     <th className="py-3 px-3">#</th>
                     <th className="py-3 px-3">
@@ -620,10 +633,10 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                     </th>
                     <th className="py-3 px-3">Dif. Tiempo</th>
                     <th className="py-3 px-3">
-                      <div>Monto A1 (E)</div>
-                      <div className="text-slate-400">Monto A3 (H)</div>
+                      <div className="text-rose-600 font-bold">A1 SPIN (Col E)</div>
+                      <div className="text-amber-600 font-semibold">A3 Expirada (Col H)</div>
                     </th>
-                    <th className="py-3 px-3">Margen Detectado</th>
+                    <th className="py-3 px-3">Margen / Propina</th>
                     <th className="py-3 px-3">Store ID (P)</th>
                     <th className="py-3 px-3">Concesión (B)</th>
                     <th className="py-3 px-3">Código (C)</th>
@@ -742,9 +755,28 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
 
         {/* SUBTAB 3: POSIBLES EXPIRADAS CON COBRO */}
         {subTab === 'expired_charges' && (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs">
-              <thead className="bg-slate-50 text-slate-500 uppercase font-mono tracking-wider border-b border-slate-200 text-[10px] font-bold">
+          <div>
+            <div className="p-3.5 bg-rose-50/70 border-b border-rose-200 text-rose-950 text-xs flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>
+                  <strong>Posibles Expiradas con Cobro:</strong> Órdenes expiradas en Archivo 3 donde un cliente tiene un cargo bancario aprobado coincidente en Archivo 1 (SPIN).
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="text-[11px] text-slate-500 font-mono font-medium bg-white px-2 py-0.5 rounded border border-rose-200">
+                  ↕ Recuadro deslizable
+                </span>
+                <span className="font-mono font-bold bg-white px-2.5 py-1 rounded-lg border border-rose-300 text-rose-700 shadow-2xs">
+                  {possibleExpiredCharges.length} detectadas
+                </span>
+              </div>
+            </div>
+
+            {/* Recuadro con barra deslizadora */}
+            <div className="overflow-x-auto overflow-y-auto max-h-[540px] border border-slate-200 bg-white rounded-b-2xl shadow-inner scrollbar-thin">
+              <table className="w-full text-left text-xs">
+                <thead className="sticky top-0 z-10 bg-slate-100/95 backdrop-blur-xs text-slate-700 uppercase font-mono tracking-wider border-b border-slate-200 text-[10px] font-bold shadow-2xs">
                 <tr>
                   <th className="py-3 px-3">#</th>
                   <th className="py-3 px-3">
@@ -753,10 +785,10 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                   </th>
                   <th className="py-3 px-3">Dif. Tiempo</th>
                   <th className="py-3 px-3">
-                    <div>Monto A1 (E)</div>
-                    <div className="text-slate-400">Monto A3 (H)</div>
+                    <div className="text-rose-600 font-bold">A1 SPIN (Col E)</div>
+                    <div className="text-amber-600 font-semibold">A3 Expirada (Col H)</div>
                   </th>
-                  <th className="py-3 px-3">Margen Detectado</th>
+                  <th className="py-3 px-3">Margen / Propina</th>
                   <th className="py-3 px-3">Store ID (P)</th>
                   <th className="py-3 px-3">Concesión (B)</th>
                   <th className="py-3 px-3">Código (C)</th>
@@ -850,7 +882,8 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
               </tbody>
             </table>
           </div>
-        )}
+        </div>
+      )}
 
         {/* SUBTAB 4: CRUCE DE TERMINALES */}
         {subTab === 'terminals_mapped' && (
@@ -860,9 +893,8 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
             </h4>
             <p className="text-xs text-slate-600 mb-4 leading-relaxed">
               El flujo de resolución toma las terminales que tuvieron ventas registradas en el{' '}
-              <strong className="text-slate-900">Archivo 2 [Excel detallado pagos] (Columna S)</strong>, las busca en la{' '}
-              <strong className="text-indigo-600">Columna C</strong> de la base de datos de terminales en
-              Firebase, obtiene el <strong className="text-indigo-600">ID Store (Columna D)</strong> y con eso
+              <strong className="text-slate-900">Archivo 2 [Órdenes Yoshi] (Columna S)</strong>, las busca en la{' '}
+              <strong className="text-indigo-600">Columna C</strong> del catálogo de terminales registradas, obtiene el <strong className="text-indigo-600">ID Store (Columna D)</strong> y con eso
               filtra las transacciones del <strong className="text-slate-900">Archivo 1 [SPIN] (Columna P)</strong>.
             </p>
 
@@ -1002,30 +1034,93 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                 <p className="text-sm font-bold text-amber-600 font-mono">{selectedItem.timeDiffFormatted}</p>
               </div>
 
-              <div className="p-3 rounded-xl bg-rose-50/50 border border-rose-200">
-                <span className="text-rose-700 text-[10px] uppercase font-mono font-bold">Monto Cobrado (E)</span>
-                <p className="text-base font-black text-rose-600 font-mono">
+              {/* CARD 1: Archivo 1 SPIN Col E */}
+              <div className="p-3.5 rounded-2xl bg-rose-50/70 border border-rose-200">
+                <span className="text-rose-700 text-[10px] uppercase font-mono font-bold block">
+                  Archivo 1 (SPIN) • Col E
+                </span>
+                <span className="text-xs text-rose-500 font-medium block mb-1">
+                  Monto Cobrado
+                </span>
+                <p className="text-base font-black text-rose-700 font-mono">
                   ${selectedItem.montoArchivo1.toFixed(2)}
                 </p>
+                <span className="text-[10px] text-rose-400 font-mono mt-0.5 block">
+                  Transacción SPIN
+                </span>
               </div>
 
-              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
-                <span className="text-slate-500 text-[10px] uppercase font-mono font-bold">Monto Base (Col H)</span>
-                <p className="text-sm font-bold text-slate-900 font-mono">
-                  ${selectedItem.montoArchivo3Base.toFixed(2)}
+              {/* CARD 2: Archivo 2 Órdenes Yoshi Col H */}
+              <div className="p-3.5 rounded-2xl bg-indigo-50/70 border border-indigo-200">
+                <span className="text-indigo-700 text-[10px] uppercase font-mono font-bold block">
+                  Archivo 2 (Órdenes Yoshi) • Col H
+                </span>
+                <span className="text-xs text-indigo-500 font-medium block mb-1">
+                  Monto Total Órdenes Yoshi
+                </span>
+                <p className="text-base font-black text-indigo-700 font-mono">
+                  ${(selectedItem.montoArchivo2Total || 0).toFixed(2)}
                 </p>
+                <span className="text-[10px] text-indigo-400 font-mono mt-0.5 block">
+                  {selectedItem.montoArchivo2Total && selectedItem.montoArchivo2Total > 0
+                    ? 'Orden generada coincidente'
+                    : 'Sin orden en Yoshi (Aprobada Restante)'}
+                </span>
               </div>
 
-              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
-                <span className="text-slate-500 text-[10px] uppercase font-mono font-bold">Monto Total (Col H)</span>
-                <p className="text-sm font-bold text-slate-900 font-mono">
+              {/* CARD 3: Archivo 3 Expiradas Col H */}
+              <div className="p-3.5 rounded-2xl bg-amber-50/70 border border-amber-200">
+                <span className="text-amber-700 text-[10px] uppercase font-mono font-bold block">
+                  Archivo 3 (Expiradas) • Col H
+                </span>
+                <span className="text-xs text-amber-600 font-medium block mb-1">
+                  Monto Base / Total Expirada
+                </span>
+                <p className="text-base font-black text-amber-700 font-mono">
                   ${selectedItem.montoArchivo3Total.toFixed(2)}
                 </p>
+                <span className="text-[10px] text-amber-500 font-mono mt-0.5 block">
+                  {selectedItem.montoArchivo3Total > 0
+                    ? selectedItem.marginLabel
+                    : 'Sin orden coincidente en A3'}
+                </span>
+              </div>
+
+              {/* BARRA DE VALIDACIÓN DE CRUCE */}
+              <div className="col-span-2 sm:col-span-3 p-3 rounded-2xl bg-slate-100 border border-slate-200 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="font-bold text-slate-800 font-mono">Validación de Cruce:</span>
+                    <span className="text-slate-600 font-mono text-[11px]">
+                      Cobrado A1 Col E (${selectedItem.montoArchivo1.toFixed(2)}) vs Yoshi A2 Col H (${(selectedItem.montoArchivo2Total || 0).toFixed(2)}) vs Expirada A3 Col H (${selectedItem.montoArchivo3Total.toFixed(2)})
+                    </span>
+                  </div>
+                  {selectedItem.marginType.startsWith('plus') && (
+                    <p className="text-[11px] text-amber-800 font-semibold flex items-center gap-1.5">
+                      <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0"></span>
+                      <span>El porcentaje evaluado ({selectedItem.marginType.replace('plus_', '')}%) es por posible propina</span>
+                    </p>
+                  )}
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
+                  <span className="px-2.5 py-1 rounded-md text-[11px] font-bold font-mono bg-white border border-slate-200 text-slate-800 shadow-2xs">
+                    {selectedItem.marginLabel}
+                  </span>
+                </div>
               </div>
 
               <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
-                <span className="text-slate-500 text-[10px] uppercase font-mono font-bold">Aumento Detectado</span>
+                <span className="text-slate-500 text-[10px] uppercase font-mono font-bold">
+                  {selectedItem.marginType.startsWith('plus')
+                    ? 'Aumento / Posible Propina'
+                    : 'Aumento Detectado'}
+                </span>
                 <p className="text-xs font-bold text-emerald-700 font-mono">{selectedItem.marginLabel}</p>
+                {selectedItem.marginType.startsWith('plus') && (
+                  <span className="text-[10px] text-amber-700 font-medium block mt-0.5">
+                    El porcentaje es por posible propina
+                  </span>
+                )}
               </div>
 
               <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">

@@ -6,7 +6,7 @@ interface FileUploaderCardProps {
   fileNumber: 1 | 2 | 3;
   title: string;
   subtitle: string;
-  discardRuleText: string;
+  discardRuleText?: string;
   columnsSummary: Array<{ col: string; name: string }>;
   fileName: string | null;
   rowCount: number;
@@ -117,12 +117,6 @@ export const FileUploaderCard: React.FC<FileUploaderCardProps> = ({
             <Trash2 className="w-4 h-4" />
           </button>
         )}
-      </div>
-
-      {/* Discard info badge */}
-      <div className="mb-3 px-2.5 py-1.5 rounded-lg bg-amber-50/80 border border-amber-200/80 text-[11px] text-amber-900 flex items-center gap-1.5 font-medium">
-        <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0"></span>
-        <span className="font-mono text-[10.5px] leading-tight">{discardRuleText}</span>
       </div>
 
       {/* Main dropzone or loaded card */}

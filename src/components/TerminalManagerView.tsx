@@ -65,14 +65,14 @@ export const TerminalManagerView: React.FC<TerminalManagerViewProps> = ({
       await batchSaveTerminals(extracted);
       setStatusMessage({
         type: 'success',
-        text: `¡Se importaron y sincronizaron ${extracted.length} terminales con Firebase Firestore exitosamente!`,
+        text: `¡Se importaron ${extracted.length} terminales exitosamente!`,
       });
       onRefresh();
     } catch (err: any) {
       console.error(err);
       setStatusMessage({
         type: 'error',
-        text: 'Error al procesar el archivo o guardar en Firestore: ' + (err.message || 'Error desconocido'),
+        text: 'Error al procesar el archivo o guardar: ' + (err.message || 'Error desconocido'),
       });
     } finally {
       setIsSubmitting(false);
@@ -134,7 +134,7 @@ export const TerminalManagerView: React.FC<TerminalManagerViewProps> = ({
       );
       setStatusMessage({
         type: 'success',
-        text: `¡Se cargaron ${SAMPLE_TERMINALS.length} terminales de prueba en Firebase Firestore!`,
+        text: `¡Se cargaron ${SAMPLE_TERMINALS.length} terminales de prueba exitosamente!`,
       });
       onRefresh();
     } catch (err: any) {
@@ -163,7 +163,7 @@ export const TerminalManagerView: React.FC<TerminalManagerViewProps> = ({
     ws['!cols'] = [{ wch: 8 }, { wch: 18 }, { wch: 24 }, { wch: 20 }, { wch: 28 }, { wch: 24 }];
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, 'Terminales_En_Operacion');
-    XLSX.writeFile(wb, `Base_Terminales_Firebase_${new Date().toISOString().slice(0, 10)}.xlsx`, { compression: false });
+    XLSX.writeFile(wb, `Base_Terminales_${new Date().toISOString().slice(0, 10)}.xlsx`, { compression: false });
   };
 
   const filteredTerminals = terminals.filter(
@@ -184,7 +184,7 @@ export const TerminalManagerView: React.FC<TerminalManagerViewProps> = ({
                 <Database className="w-5 h-5" />
               </span>
               <h2 className="text-xl font-extrabold text-slate-900 tracking-tight">
-                Base de Datos de Terminales en Funcionamiento (Firebase Firestore)
+                Base de Datos de Terminales en Funcionamiento
               </h2>
             </div>
             <p className="text-sm text-slate-600 max-w-3xl leading-relaxed">
@@ -323,7 +323,7 @@ export const TerminalManagerView: React.FC<TerminalManagerViewProps> = ({
                   <td colSpan={6} className="py-8 text-center text-slate-500 font-sans">
                     <div className="flex items-center justify-center gap-2">
                       <div className="w-4 h-4 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
-                      <span>Cargando terminales desde Firebase...</span>
+                      <span>Cargando base de terminales...</span>
                     </div>
                   </td>
                 </tr>
@@ -378,7 +378,7 @@ export const TerminalManagerView: React.FC<TerminalManagerViewProps> = ({
       {showAddModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-xs">
           <div className="bg-white border border-slate-200 rounded-3xl w-full max-w-md p-6 shadow-2xl">
-            <h3 className="text-base font-extrabold text-slate-900 mb-1">Registrar Terminal en Firebase</h3>
+            <h3 className="text-base font-extrabold text-slate-900 mb-1">Registrar Nueva Terminal</h3>
             <p className="text-xs text-slate-500 mb-4">
               Ingresa el número de serie de la terminal y su correspondiente Store ID.
             </p>
@@ -438,7 +438,7 @@ export const TerminalManagerView: React.FC<TerminalManagerViewProps> = ({
                   disabled={isSubmitting}
                   className="px-4 py-2 rounded-xl text-xs bg-indigo-600 hover:bg-indigo-700 text-white font-bold shadow-xs transition"
                 >
-                  {isSubmitting ? 'Guardando...' : 'Guardar en Firebase'}
+                  {isSubmitting ? 'Guardando...' : 'Guardar Terminal'}
                 </button>
               </div>
             </form>

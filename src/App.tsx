@@ -3,16 +3,15 @@ import {
   SlidersHorizontal,
   AlertCircle,
   Database,
-  Sparkles,
   Zap,
   Trash2,
   Eye,
+  Play,
 } from 'lucide-react';
 import { Header } from './components/Header';
 import { FileUploaderCard } from './components/FileUploaderCard';
 import { TerminalManagerView } from './components/TerminalManagerView';
 import { ResultsDisplay } from './components/ResultsDisplay';
-import { SampleFilesDownloader } from './components/SampleFilesDownloader';
 import {
   TerminalRecord,
   TransactionRecord,
@@ -34,13 +33,12 @@ import {
   parseGeneratedOrdersFile,
   parseExpiredOrdersFile,
   performReconciliation,
-  getSampleRawRows,
   DEFAULT_OPTIONS,
   ReconciliationOptions,
 } from './utils/reconciler';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'reconciliation' | 'terminals' | 'samples'>('reconciliation');
+  const [activeTab, setActiveTab] = useState<'reconciliation' | 'terminals'>('reconciliation');
 
   // Terminals from Firebase
   const [terminals, setTerminals] = useState<TerminalRecord[]>([]);
@@ -113,26 +111,29 @@ export default function App() {
     loadTerminalsFromFirebase();
   }, []);
 
-  // FAST RECONCILIATION ENGINE (Runs fast as before without slow playback buttons)
-  useEffect(() => {
+  const [hasReconciled, setHasReconciled] = useState(false);
+  const [isReconciling, setIsReconciling] = useState(false);
+
+  // Manual reconciliation handler (triggered explicitly by the button)
+  const handleStartReconciliation = () => {
     if (!file1Rows || !file2Rows) {
-      if (!file1Rows && !file2Rows && !file3Rows) {
-        setMatchedWithOrders(null);
-        setUnmatchedApproved(null);
-        setPossibleExpiredCharges(null);
-        setActiveStoreIdsMap(null);
-        setSummary(null);
-        setProgressState(null);
-      }
+      setErrorMessage('Debes cargar al menos el Archivo 1 (SPIN) y el Archivo 2 (Órdenes Yoshi) para iniciar el cotejamiento.');
       return;
     }
+
+    setErrorMessage(null);
+    setIsReconciling(true);
 
     try {
       const transactions = parseTransactionsFile(file1Rows);
       const generatedOrders = parseGeneratedOrdersFile(file2Rows);
       const expiredOrders = file3Rows ? parseExpiredOrdersFile(file3Rows) : [];
 
-      if (transactions.length === 0 || generatedOrders.length === 0) return;
+      if (transactions.length === 0 || generatedOrders.length === 0) {
+        setErrorMessage('Los archivos cargados no contienen filas de transacciones u órdenes válidas.');
+        setIsReconciling(false);
+        return;
+      }
 
       const results = performReconciliation(
         transactions,
@@ -158,6 +159,8 @@ export default function App() {
         expiredMatchesCountLive: results.possibleExpiredCharges.length,
       });
 
+      setHasReconciled(true);
+
       // Smoothly scroll down to matches screen
       setTimeout(() => {
         resultsSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -165,27 +168,9 @@ export default function App() {
     } catch (err: any) {
       console.warn('Reconciliation error:', err);
       setErrorMessage(err.message || 'Error al procesar los archivos');
+    } finally {
+      setIsReconciling(false);
     }
-  }, [file1Rows, file2Rows, file3Rows, terminals, options]);
-
-  // One-click demo loader
-  const handleLoadSamplesDirectly = () => {
-    const { f1Rows, f2Rows, f3Rows } = getSampleRawRows();
-
-    setFile1Name('Archivo_1_Transacciones_SPIN_Demo.xlsx');
-    setFile1Rows(f1Rows);
-
-    setFile2Name('Archivo_2_Ordenes_Detallado_Pagos_Demo.xlsx');
-    setFile2Rows(f2Rows);
-
-    setFile3Name('Archivo_3_Ordenes_Expiradas_Demo.xlsx');
-    setFile3Rows(f3Rows);
-
-    setActiveTab('reconciliation');
-
-    setTimeout(() => {
-      resultsSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }, 150);
   };
 
   const handleReset = () => {
@@ -202,17 +187,29 @@ export default function App() {
     setSummary(null);
     setProgressState(null);
     setErrorMessage(null);
+    setHasReconciled(false);
+    setIsReconciling(false);
   };
 
-  // Live match preview counts for real-time header & pill
+  const handleFileChange = () => {
+    setHasReconciled(false);
+    setMatchedWithOrders(null);
+    setUnmatchedApproved(null);
+    setPossibleExpiredCharges(null);
+    setActiveStoreIdsMap(null);
+    setSummary(null);
+    setProgressState(null);
+  };
+
+  // Live match preview counts for header & pill
   const realtimeStatus = useMemo(() => {
-    const isLive = Boolean(file1Rows && file2Rows);
+    const isLive = Boolean(hasReconciled && file1Rows && file2Rows);
     return {
       isLive,
       matchedCount: matchedWithOrders?.length || 0,
       expiredWithChargeCount: possibleExpiredCharges?.length || 0,
     };
-  }, [file1Rows, file2Rows, matchedWithOrders, possibleExpiredCharges]);
+  }, [hasReconciled, file1Rows, file2Rows, matchedWithOrders, possibleExpiredCharges]);
 
   const scrollToResults = () => {
     resultsSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -291,7 +288,7 @@ export default function App() {
 
                 <p className="text-sm text-slate-600 leading-relaxed font-medium">
                   Sube los archivos para procesar el cotejo en vivo: filtra transacciones por las
-                  terminales activas en Firebase, coteja en tiempo real contra órdenes generadas y descubre
+                  terminales activas en el catálogo, coteja en tiempo real contra órdenes generadas y descubre
                   transacciones aprobadas huérfanas que coinciden en hora y monto con órdenes expiradas.
                 </p>
 
@@ -302,7 +299,7 @@ export default function App() {
                       1. Cruce con Terminales
                     </span>
                     <p className="text-slate-600">
-                      Toma Col S (Archivo 2), busca en Base Firebase (Col C) y obtiene ID Store (Col D)
+                      Toma Col S (Archivo 2), busca en el Catálogo de Terminales (Col C) y obtiene ID Store (Col D)
                       para filtrar Archivo 1 (Col P).
                     </p>
                   </div>
@@ -373,40 +370,41 @@ export default function App() {
 
             {/* 3 Uploaders Row */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-              {/* File 1: Total Registro de Transacciones (SPIN) */}
+              {/* File 1: Archivo 1 SPIN */}
               <FileUploaderCard
                 fileNumber={1}
-                title="Total Registro de Transacciones (SPIN)"
-                subtitle="Transacciones bancarias exitosas o rechazadas"
-                discardRuleText="Descarta los primeros 12 renglones (datos desde fila 13)"
+                title="Archivo 1: SPIN (Total de Registro de Transacciones)"
+                subtitle="Transacciones bancarias SPIN exitosas o rechazadas"
                 columnsSummary={[
                   { col: 'D', name: 'Hora de transacción' },
+                  { col: 'E', name: 'Monto de transacción (Cobrado)' },
                   { col: 'I & L', name: 'Estatus (ambas Aprobadas)' },
                   { col: 'P', name: 'Store ID' },
                   { col: 'S', name: 'Terminación tarjeta' },
                   { col: 'Y', name: 'Código autorización' },
-                  { col: 'E', name: 'Monto de transacción' },
                 ]}
                 fileName={file1Name}
                 rowCount={file1Rows ? Math.max(0, file1Rows.length - 12) : 0}
                 onFileLoaded={(name, rows) => {
                   setFile1Name(name);
                   setFile1Rows(rows);
+                  handleFileChange();
                 }}
                 onClear={() => {
                   setFile1Name(null);
                   setFile1Rows(null);
+                  handleFileChange();
                 }}
               />
 
-              {/* File 2: Total Órdenes Generadas (Excel detallado pagos) */}
+              {/* File 2: Archivo 2 Órdenes Yoshi */}
               <FileUploaderCard
                 fileNumber={2}
-                title="Total Órdenes Generadas (Excel detallado pagos)"
-                subtitle="Órdenes de venta del sistema POS"
-                discardRuleText="Datos a partir del renglón 5 (descarta renglones 1 al 4)"
+                title="Archivo 2: Órdenes Yoshi (Total de Órdenes Generadas)"
+                subtitle="Órdenes de venta del sistema POS Yoshi"
                 columnsSummary={[
                   { col: 'A', name: 'Fecha de venta (solo hora)' },
+                  { col: 'H', name: 'Monto Total orden generada' },
                   { col: 'M', name: 'Tarjeta (últimos 4 dígitos)' },
                   { col: 'R', name: 'Código de autorización' },
                   { col: 'S', name: 'Número de terminal' },
@@ -416,38 +414,87 @@ export default function App() {
                 onFileLoaded={(name, rows) => {
                   setFile2Name(name);
                   setFile2Rows(rows);
+                  handleFileChange();
                 }}
                 onClear={() => {
                   setFile2Name(null);
                   setFile2Rows(null);
+                  handleFileChange();
                 }}
               />
 
-              {/* File 3: Total Órdenes Expiradas */}
+              {/* File 3: Archivo 3 Expiradas */}
               <FileUploaderCard
                 fileNumber={3}
-                title="Total Órdenes Expiradas"
-                subtitle="Órdenes canceladas por timeout"
-                discardRuleText="Datos a partir del renglón 5 (descarta renglones 1 al 4)"
+                title="Archivo 3: Expiradas (Total de Órdenes Expiradas)"
+                subtitle="Órdenes expiradas sin completar"
                 columnsSummary={[
                   { col: 'A', name: 'Hora (solo hora)' },
                   { col: 'B', name: 'Concesión' },
                   { col: 'C', name: 'Código de orden' },
                   { col: 'E', name: 'Vendedor asignado' },
-                  { col: 'H', name: 'Monto Base (+5%..+20%)' },
-                  { col: 'H', name: 'Total de la orden' },
+                  { col: 'H', name: 'Monto Base / Total (+5%..+20%)' },
                 ]}
                 fileName={file3Name}
                 rowCount={file3Rows ? Math.max(0, file3Rows.length - 4) : 0}
                 onFileLoaded={(name, rows) => {
                   setFile3Name(name);
                   setFile3Rows(rows);
+                  handleFileChange();
                 }}
                 onClear={() => {
                   setFile3Name(null);
                   setFile3Rows(null);
+                  handleFileChange();
                 }}
               />
+            </div>
+
+            {/* BOTÓN PARA COMENZAR CON EL COTEJAMIENTO (MANUAL) */}
+            <div className="p-5 rounded-3xl bg-white border-2 border-rose-200 shadow-xs flex flex-col sm:flex-row items-center justify-between gap-4">
+              <div className="flex items-center gap-3.5">
+                <div className={`w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 border transition ${
+                  file1Rows && file2Rows
+                    ? 'bg-rose-50 border-rose-200 text-rose-600'
+                    : 'bg-slate-100 border-slate-200 text-slate-400'
+                }`}>
+                  <Zap className={`w-6 h-6 ${file1Rows && file2Rows ? 'animate-pulse text-rose-600' : 'text-slate-400'}`} />
+                </div>
+                <div>
+                  <h3 className="font-black text-slate-900 text-base">
+                    {hasReconciled ? 'Cotejamiento Finalizado' : 'Iniciar Cotejamiento de Archivos'}
+                  </h3>
+                  <p className="text-xs text-slate-500 font-medium">
+                    {!file1Rows || !file2Rows
+                      ? 'Carga Archivo 1 (SPIN) y Archivo 2 (Órdenes Yoshi) para habilitar el cotejo.'
+                      : hasReconciled
+                      ? 'Coincidencias calculadas y visibles en el recuadro inferior. Presiona nuevamente para recalcular.'
+                      : 'Archivos listos para cotejar. Haz clic en "Comenzar Cotejamiento" para procesar.'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-3 w-full sm:w-auto justify-end">
+                <button
+                  type="button"
+                  onClick={handleStartReconciliation}
+                  disabled={!file1Rows || !file2Rows || isReconciling}
+                  className={`w-full sm:w-auto inline-flex items-center justify-center gap-2 px-8 py-3.5 rounded-2xl font-black text-sm transition-all shadow-sm ${
+                    !file1Rows || !file2Rows
+                      ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'
+                      : 'bg-rose-600 hover:bg-rose-700 text-white border border-rose-700 hover:shadow-md active:scale-98 cursor-pointer'
+                  }`}
+                >
+                  <Play className={`w-4 h-4 fill-current ${isReconciling ? 'animate-spin' : ''}`} />
+                  <span>
+                    {isReconciling
+                      ? 'Procesando...'
+                      : hasReconciled
+                      ? 'Volver a Cotejar'
+                      : 'Comenzar Cotejamiento'}
+                  </span>
+                </button>
+              </div>
             </div>
 
             {/* Database of Terminals Status & Options bar */}
@@ -459,7 +506,7 @@ export default function App() {
                 <div>
                   <div className="flex items-center gap-2">
                     <h4 className="text-xs font-bold text-slate-800 uppercase font-mono tracking-wider">
-                      Base de Terminales en Firebase:
+                      Base de Terminales Registradas:
                     </h4>
                     <span className="px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-700 font-mono text-xs font-bold border border-indigo-200">
                       {terminals.length} activas
@@ -481,15 +528,6 @@ export default function App() {
                   <SlidersHorizontal className="w-4 h-4 text-slate-500" />
                   <span>Parámetros de Tolerancia</span>
                 </button>
-
-                <button
-                  onClick={handleLoadSamplesDirectly}
-                  className="px-3.5 py-2 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-bold border border-slate-200 flex items-center gap-2 transition"
-                  title="Cargar archivos de prueba y ejecutar de inmediato"
-                >
-                  <Sparkles className="w-4 h-4 text-amber-500" />
-                  <span>Cargar Datos Demo</span>
-                </button>
               </div>
             </div>
 
@@ -501,8 +539,8 @@ export default function App() {
               </div>
             )}
 
-            {/* PANTALLA DE COINCIDENCIAS Y RESULTADOS */}
-            {((file1Rows && file2Rows) || summary || (matchedWithOrders && matchedWithOrders.length > 0)) && (
+            {/* PANTALLA DE COINCIDENCIAS Y RESULTADOS (SÓLO CUANDO EL USUARIO INICIA COTEJAMIENTO) */}
+            {hasReconciled && matchedWithOrders && (
               <div ref={resultsSectionRef} className="scroll-mt-20">
                 <ResultsDisplay
                   summary={
@@ -543,11 +581,6 @@ export default function App() {
             onRefresh={loadTerminalsFromFirebase}
             isLoading={isLoadingTerminals}
           />
-        )}
-
-        {/* TAB 3: SAMPLE FILES DOWNLOADER */}
-        {activeTab === 'samples' && (
-          <SampleFilesDownloader onLoadSamplesDirectly={handleLoadSamplesDirectly} />
         )}
       </main>
 
@@ -638,7 +671,7 @@ export default function App() {
                   className="w-24 bg-white border border-slate-200 rounded-xl px-3 py-1.5 text-slate-900 font-mono shadow-2xs font-bold"
                 />
                 <span className="text-slate-500 ml-2 font-medium">
-                  Tolerancia de centavos para evaluar +5%, +10%, +15%, +20% o Total
+                  Tolerancia de centavos para evaluar posibles propinas (+5%, +10%, +15%, +20%) o Total exacto
                 </span>
               </div>
             </div>
@@ -675,7 +708,7 @@ export default function App() {
             className="w-10 h-12 object-contain shrink-0"
           />
           <p className="font-extrabold text-slate-800 text-sm tracking-tight font-mono">
-            Expiraminator -Doofenshmirtz Malvados y Asociados
+            EXPIRAMINATOR - Doofenshmirtz Malvados y Asociados
           </p>
         </div>
       </footer>

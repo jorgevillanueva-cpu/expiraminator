@@ -29,6 +29,7 @@ export interface GeneratedOrderRecord {
   timeStr: string;
   timeSeconds: number;
   terminalSerial: string;   // Columna S (index 18)
+  totalAmount: number;      // Columna H (index 7) - monto total órdenes Yoshi
 }
 
 export interface ExpiredOrderRecord {
@@ -39,8 +40,8 @@ export interface ExpiredOrderRecord {
   concession: string;       // Columna B (index 1)
   code: string;             // Columna C (index 2)
   seller: string;           // Columna E (index 4)
-  baseAmount: number;       // Columna G (index 6) - monto para 5%, 10%, 15%, 20%
-  totalAmount: number;      // Columna H (index 7) - total
+  baseAmount: number;       // Columna G (index 6) - monto base anterior
+  totalAmount: number;      // Columna H (index 7) - monto base / total Col H
 }
 
 export interface MatchedOrderResult {
@@ -65,9 +66,10 @@ export interface PossibleExpiredChargeResult {
   // Report columns explicitly mandated:
   horaArchivo1: string;
   horaArchivo3: string;
-  montoArchivo1: number;
-  montoArchivo3Total: number;
-  montoArchivo3Base: number;
+  montoArchivo1: number;       // Archivo 1 SPIN Col E: Monto Cobrado
+  montoArchivo2Total: number;  // Archivo 2 Órdenes Yoshi Col H: Monto Total
+  montoArchivo3Total: number;  // Archivo 3 Expiradas Col H: Monto Base / Total
+  montoArchivo3Base: number;   // Archivo 3 Expiradas Col G (si existe)
   storeIdArchivo1: string;
   concesionArchivo3: string;
   codigoArchivo3: string;
