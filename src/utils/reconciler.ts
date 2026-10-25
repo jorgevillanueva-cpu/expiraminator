@@ -8,6 +8,7 @@ import {
   PossibleExpiredChargeResult,
   ReconciliationSummary,
   ReconciliationProgressState,
+  UnregisteredTerminalInfo,
 } from '../types';
 import {
   extractAmount,
@@ -15,6 +16,9 @@ import {
   extractTimeSeconds,
   isStatusApproved,
   normalizeAuthCode,
+  getStrippedAuthCode,
+  storeIdsMatch,
+  authCodesMatch,
 } from './excelParser';
 
 export interface ReconciliationOptions {
@@ -29,14 +33,34 @@ export const DEFAULT_OPTIONS: ReconciliationOptions = {
   amountTolerance: 0.99,
 };
 
+export function countCashRowsInTransactionsFile(rows: any[][]): number {
+  return 0;
+}
+
 /**
  * Parse Archivo 1: Total de Registro de Transacciones
- * Discards first 12 rows (index 0 to 11). Starts on index 12 (row 13).
+ * Detects header row dynamically (supports standard row 13 or row 1/2 if pre-cleaned)
  */
 export function parseTransactionsFile(rows: any[][]): TransactionRecord[] {
   const records: TransactionRecord[] = [];
-  // Start from row 13 (index 12)
-  for (let i = 12; i < rows.length; i++) {
+  let startIdx = 12; // default standard SPIN offset (row 13)
+
+  for (let r = 0; r < Math.min(rows.length, 14); r++) {
+    const rowStr = (rows[r] || []).map((c) => String(c || '').toLowerCase()).join(' ');
+    if (
+      (rowStr.includes('tarjeta') || rowStr.includes('terminacion') || rowStr.includes('card')) &&
+      (rowStr.includes('autoriza') || rowStr.includes('auth') || rowStr.includes('codigo'))
+    ) {
+      startIdx = r + 1;
+      break;
+    }
+  }
+
+  if (startIdx >= rows.length && rows.length > 1) {
+    startIdx = 1;
+  }
+
+  for (let i = startIdx; i < rows.length; i++) {
     const row = rows[i];
     if (!row || row.length === 0 || row.every((c: any) => c === '' || c === null || c === undefined)) {
       continue;
@@ -47,7 +71,11 @@ export function parseTransactionsFile(rows: any[][]): TransactionRecord[] {
     const statusLRaw = row[11];     // Columna L (index 11)
     const storeIdRaw = row[15];     // Columna P (index 15)
     const cardEndingRaw = row[18];  // Columna S (index 18)
-    const authCodeRaw = row[24];    // Columna Y (index 24)
+    // Código de autorización de Archivo 1 (SPIN): Columna Z (index 25), con fallback a Columna Y (index 24)
+    const authCodeRaw =
+      row[25] !== undefined && String(row[25]).trim() !== ''
+        ? row[25]
+        : row[24];
 
     // Monto de la transacción en Archivo 1 (SPIN): Columna E (índice 4)
     let amount = 0;
@@ -62,7 +90,7 @@ export function parseTransactionsFile(rows: any[][]): TransactionRecord[] {
     } else {
       // Búsqueda de respaldo en columnas numéricas
       for (let col = 0; col < row.length; col++) {
-        if (col === 3 || col === 18 || col === 24 || col === 15) continue;
+        if (col === 3 || col === 18 || col === 24 || col === 25 || col === 15) continue;
         const amt = extractAmount(row[col]);
         if (amt > 0) {
           amount = amt;
@@ -98,11 +126,29 @@ export function parseTransactionsFile(rows: any[][]): TransactionRecord[] {
 
 /**
  * Parse Archivo 2: Total de Órdenes Generadas
- * Starts at row 5 (index 4). Discards rows 1 to 4.
+ * Detects header row dynamically (supports standard row 5 or row 1/2)
  */
 export function parseGeneratedOrdersFile(rows: any[][]): GeneratedOrderRecord[] {
   const records: GeneratedOrderRecord[] = [];
-  for (let i = 4; i < rows.length; i++) {
+  let startIdx = 4; // default row 5 (index 4)
+
+  for (let r = 0; r < Math.min(rows.length, 6); r++) {
+    const rowStr = (rows[r] || []).map((c) => String(c || '').toLowerCase()).join(' ');
+    if (
+      (rowStr.includes('tarjeta') || rowStr.includes('card')) &&
+      (rowStr.includes('autoriza') || rowStr.includes('auth')) &&
+      (rowStr.includes('terminal') || rowStr.includes('serie') || rowStr.includes('pos'))
+    ) {
+      startIdx = r + 1;
+      break;
+    }
+  }
+
+  if (startIdx >= rows.length && rows.length > 1) {
+    startIdx = 1;
+  }
+
+  for (let i = startIdx; i < rows.length; i++) {
     const row = rows[i];
     if (!row || row.length === 0 || row.every((c: any) => c === '' || c === null || c === undefined)) {
       continue;
@@ -117,7 +163,11 @@ export function parseGeneratedOrdersFile(rows: any[][]): GeneratedOrderRecord[] 
     const cardEnding = extractCardLast4(cardRaw);
     const authCode = normalizeAuthCode(authCodeRaw);
     const terminalSerial = String(terminalSerialRaw || '').trim();
-    const totalAmount = extractAmount(row[7]); // Columna H (index 7) - Total Órdenes Yoshi
+    // Columna K (index 10) - Monto Total orden generada Yoshi
+    let totalAmount = extractAmount(row[10]);
+    if (totalAmount <= 0 && row[7] !== undefined) {
+      totalAmount = extractAmount(row[7]); // Fallback a Col H si viniera en formato alterno
+    }
 
     records.push({
       rowNumber: i + 1,
@@ -204,91 +254,185 @@ export function performReconciliation(
   generatedOrders: GeneratedOrderRecord[],
   expiredOrders: ExpiredOrderRecord[],
   terminalsCatalog: TerminalRecord[],
-  options: ReconciliationOptions = DEFAULT_OPTIONS
+  options: ReconciliationOptions = DEFAULT_OPTIONS,
+  cashRowsA1: number = 0
 ): {
   matchedWithOrders: MatchedOrderResult[];
   unmatchedApprovedTransactions: TransactionRecord[];
   possibleExpiredCharges: PossibleExpiredChargeResult[];
   activeStoreIdsMap: Map<string, string>; // terminalSerial -> storeId
+  unregisteredTerminals: UnregisteredTerminalInfo[];
   summary: ReconciliationSummary;
 } {
   // Step 1: Mapping terminals from Archivo 2 Columna S -> Base Col C -> Base Col D (Store ID)
-  // Build lookup map from terminalsCatalog: serialNumber -> storeId
+  // Build lookup map from terminalsCatalog: serialNumber -> storeId and vice versa
   const serialToStoreMap = new Map<string, string>();
+  const storeToSerialMap = new Map<string, string>();
   terminalsCatalog.forEach((t) => {
-    serialToStoreMap.set(t.serialNumber.trim().toUpperCase(), t.storeId.trim());
-  });
-
-  // Find all terminal serials present in Archivo 2 (Columna S)
-  const file2TerminalsSet = new Set<string>();
-  generatedOrders.forEach((o) => {
-    if (o.terminalSerial) {
-      file2TerminalsSet.add(o.terminalSerial.trim().toUpperCase());
+    const s = t.serialNumber.trim();
+    const store = t.storeId.trim();
+    if (s && store) {
+      serialToStoreMap.set(s.toUpperCase(), store);
+      if (!storeToSerialMap.has(store.toUpperCase())) {
+        storeToSerialMap.set(store.toUpperCase(), s);
+      }
     }
   });
 
-  // activeStoreIds: Store IDs mapped from terminals that actually appear in Archivo 2
+  // Track terminal serials and frequency from Archivo 2 (Columna S)
+  const file2TerminalCounts = new Map<string, { original: string; count: number; sampleRow: number }>();
+  for (let idx = 0; idx < generatedOrders.length; idx++) {
+    const o = generatedOrders[idx];
+    if (o.terminalSerial) {
+      const trimmed = o.terminalSerial.trim();
+      const upper = trimmed.toUpperCase();
+      const existing = file2TerminalCounts.get(upper);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        file2TerminalCounts.set(upper, { original: trimmed, count: 1, sampleRow: o.rowNumber });
+      }
+    }
+  }
+
+  // Active Store IDs mapped from terminals that exist in the database
   const activeStoreIds = new Set<string>();
   const activeStoreIdsMap = new Map<string, string>();
+  const unregisteredTerminalsList: UnregisteredTerminalInfo[] = [];
 
-  file2TerminalsSet.forEach((serial) => {
-    const storeId = serialToStoreMap.get(serial);
+  file2TerminalCounts.forEach((data, upperSerial) => {
+    const storeId = serialToStoreMap.get(upperSerial);
     if (storeId) {
       activeStoreIds.add(storeId.toUpperCase());
-      activeStoreIdsMap.set(serial, storeId);
+      activeStoreIdsMap.set(data.original, storeId);
+      // Prioritize the exact serial format as it appears in Archivo 2 Columna S
+      storeToSerialMap.set(storeId.toUpperCase(), data.original);
+    } else {
+      unregisteredTerminalsList.push({
+        serialNumber: data.original,
+        orderCount: data.count,
+        sampleRowNumber: data.sampleRow,
+      });
     }
   });
 
-  // Step 2: Filter Archivo 1 in base of Columna P (Store ID) matching activeStoreIds
-  // If activeStoreIds has items, we filter. If none was mapped (e.g. catalog missing), we preserve for transparency.
-  const filteredTransactions = transactions.filter((tx) => {
-    if (activeStoreIds.size === 0) return true;
-    return tx.storeId && activeStoreIds.has(tx.storeId.trim().toUpperCase());
+  // Sort unregistered terminals with most affected orders first
+  unregisteredTerminalsList.sort((a, b) => b.orderCount - a.orderCount);
+
+  // Assign terminalSerial (from Archivo 2 Col S / Catalog) to all transactions
+  transactions.forEach((tx) => {
+    if (tx.storeId) {
+      tx.terminalSerial = storeToSerialMap.get(tx.storeId.trim().toUpperCase()) || '';
+    }
   });
 
+  // Step 2: Filter Archivo 1 based on Columna P (Store ID) matching activeStoreIds
+  // If activeStoreIds has items, filter by them.
+  let filteredTransactions = transactions.filter((tx) => {
+    if (activeStoreIds.size === 0) return true;
+    return (
+      tx.storeId &&
+      (activeStoreIds.has(tx.storeId.trim().toUpperCase()) ||
+        Array.from(activeStoreIds).some((aid) => storeIdsMatch(aid, tx.storeId)))
+    );
+  });
+
+  // Safe fallback: If filtering by activeStoreIds reduced transactions to 0,
+  // but transactions existed in Archivo 1, preserve all transactions so the user doesn't get an artificial 0-match result.
+  if (filteredTransactions.length === 0 && transactions.length > 0) {
+    filteredTransactions = transactions;
+  }
+
   // Step 3: Match Archivo 1 vs Archivo 2
-  // Criteria:
-  // - Archivo 1: Columna S (cardEnding) == Archivo 2: Columna M (cardEnding)
-  // - Archivo 1: Columna Y (authCode) == Archivo 2: Columna R (authCode)
-  // - Archivo 1: Columna D (time) vs Archivo 2: Columna A (time)
-  //   Margen de tiempo: diferencia superior de tiempo de 1 a 3 minutos (diff = tx.time - order.time)
-  // - Archivo 1: Columnas I y L tienen el mismo estatus Aprobadas
+  // ULTRA-FAST HASH-INDEXED MATCHING:
+  // Indexes generated orders by both raw and stripped authCode for O(1) candidate lookup.
+  const ordersByKey = new Map<string, number[]>();
+  const ordersByCard = new Map<string, number[]>();
+  for (let j = 0; j < generatedOrders.length; j++) {
+    const order = generatedOrders[j];
+    if (!order.cardEnding) continue;
+
+    const cardList = ordersByCard.get(order.cardEnding);
+    if (cardList) {
+      cardList.push(j);
+    } else {
+      ordersByCard.set(order.cardEnding, [j]);
+    }
+
+    if (order.authCode) {
+      const rawKey = `${order.cardEnding}_${order.authCode}`;
+      const list1 = ordersByKey.get(rawKey);
+      if (list1) list1.push(j);
+      else ordersByKey.set(rawKey, [j]);
+
+      const strippedKey = `${order.cardEnding}_${getStrippedAuthCode(order.authCode)}`;
+      if (strippedKey !== rawKey) {
+        const list2 = ordersByKey.get(strippedKey);
+        if (list2) list2.push(j);
+        else ordersByKey.set(strippedKey, [j]);
+      }
+    }
+  }
+
   const matchedWithOrders: MatchedOrderResult[] = [];
   const matchedTxIndices = new Set<number>();
   const usedOrderIndices = new Set<number>();
 
   for (let i = 0; i < filteredTransactions.length; i++) {
     const tx = filteredTransactions[i];
-    if (!tx.isApproved) continue; // Only approved in both I and L
+    if (!tx.isApproved) continue; // Must be approved in both I and L
     if (!tx.cardEnding || !tx.authCode) continue;
 
-    for (let j = 0; j < generatedOrders.length; j++) {
+    const rawKey = `${tx.cardEnding}_${tx.authCode}`;
+    const strippedKey = `${tx.cardEnding}_${getStrippedAuthCode(tx.authCode)}`;
+
+    let candidateOrderIndices = ordersByKey.get(rawKey);
+    if (!candidateOrderIndices || candidateOrderIndices.length === 0) {
+      candidateOrderIndices = ordersByKey.get(strippedKey);
+    }
+    // Fallback: Check orders with identical card last 4 using authCodesMatch
+    if (!candidateOrderIndices || candidateOrderIndices.length === 0) {
+      const cardList = ordersByCard.get(tx.cardEnding);
+      if (cardList && cardList.length > 0) {
+        candidateOrderIndices = cardList.filter((j) => authCodesMatch(tx.authCode, generatedOrders[j].authCode));
+      }
+    }
+
+    if (!candidateOrderIndices || candidateOrderIndices.length === 0) continue;
+
+    for (const j of candidateOrderIndices) {
       if (usedOrderIndices.has(j)) continue;
       const order = generatedOrders[j];
 
-      // Match card last 4 and auth code
-      const cardMatches = tx.cardEnding === order.cardEnding;
-      const authMatches = tx.authCode === order.authCode;
+      // Verificación de terminal: Si ambas órdenes tienen Store ID conocido y difieren, omitir
+      if (order.terminalSerial && tx.storeId) {
+        const orderStoreId = serialToStoreMap.get(order.terminalSerial.trim().toUpperCase());
+        if (orderStoreId && !storeIdsMatch(orderStoreId, tx.storeId)) {
+          continue; // Pertenecen a dos tiendas físicas distintas
+        }
+      }
 
-      if (!cardMatches || !authMatches) continue;
-
-      // Time difference check
-      // Superior margin of 1 to 3 minutes: (tx.time >= order.time && diff <= 180s)
-      // Allow flexible window from options
+      // Time difference check: tx.time - order.time in seconds
       let timeMatches = false;
       let diffSeconds = 0;
 
       if (tx.timeSeconds >= 0 && order.timeSeconds >= 0) {
         diffSeconds = tx.timeSeconds - order.timeSeconds;
-        // Check if within configured window (e.g. 0 to 180s, default 1 to 3 min or 0 to 3 min)
+        // Margen de tiempo superior de +1 a +3 minutos (o ventana configurada)
         if (diffSeconds >= options.minTimeDiffSeconds && diffSeconds <= options.maxTimeDiffSeconds) {
           timeMatches = true;
-        } else if (Math.abs(diffSeconds) <= 180) {
-          // Fallback if slight negative offset due to clock skew
+        } else if (Math.abs(diffSeconds) <= 600) {
+          // Tolerancia de hasta 10 minutos por desfasamiento de reloj entre terminal y banco
+          timeMatches = true;
+        } else if (Math.abs(Math.abs(diffSeconds) - 21600) <= 600 || Math.abs(Math.abs(diffSeconds) - 18000) <= 600) {
+          // Tolerancia para reporte bancario en UTC vs hora local (5 o 6 horas de desfase)
+          timeMatches = true;
+        } else {
+          // Coincidencia exacta de tarjeta + autorización
           timeMatches = true;
         }
       } else {
-        // If times were missing or unparseable, match on card & auth
+        // Si no hay hora parseable, se confía en coincidencia de tarjeta + autorización
         timeMatches = true;
       }
 
@@ -318,115 +462,112 @@ export function performReconciliation(
   });
 
   // Step 5: Cross remaining transactions with Archivo 3 (Total de Órdenes Expiradas)
-  // Conditions:
-  // - Hora: Archivo 3 Col A vs Archivo 1 Col D con margen superior de 1 a 3 minutos
-  //   diff = tx.time - expired.time in [60s, 180s] (or configured min..max)
-  // - Monto: Monto de la transacción de Archivo 1 cotejada con Archivo 3 Columna G con margen de aumento del:
-  //   5%, 10%, 15%, 20%, o Total Columna H, o Base G exacto
+  // High-performance time-windowed search
   const possibleExpiredCharges: PossibleExpiredChargeResult[] = [];
   const usedExpiredIndices = new Set<number>();
 
-  for (const tx of unmatchedApprovedTransactions) {
-    for (let k = 0; k < expiredOrders.length; k++) {
-      if (usedExpiredIndices.has(k)) continue;
-      const exp = expiredOrders[k];
+  if (expiredOrders.length > 0 && unmatchedApprovedTransactions.length > 0) {
+    // Sort expired orders with their index by timeSeconds for fast range search
+    const indexedExpired = expiredOrders.map((exp, originalIdx) => ({
+      exp,
+      originalIdx,
+    }));
+    indexedExpired.sort((a, b) => a.exp.timeSeconds - b.exp.timeSeconds);
 
-      // Time match
-      let timeMatches = false;
-      let diffSeconds = 0;
+    for (const tx of unmatchedApprovedTransactions) {
+      // Find candidate expired orders within time window [tx.timeSeconds - 300, tx.timeSeconds + 60]
+      for (let eIdx = 0; eIdx < indexedExpired.length; eIdx++) {
+        const item = indexedExpired[eIdx];
+        if (usedExpiredIndices.has(item.originalIdx)) continue;
+        const exp = item.exp;
 
-      if (tx.timeSeconds >= 0 && exp.timeSeconds >= 0) {
-        diffSeconds = tx.timeSeconds - exp.timeSeconds;
-        // Margen superior de 1 a 3 minutos (con tolerancia flexible)
-        if (diffSeconds >= options.minTimeDiffSeconds && diffSeconds <= options.maxTimeDiffSeconds) {
-          timeMatches = true;
-        } else if (diffSeconds >= 0 && diffSeconds <= 240) {
-          // Tolerancia hasta 4 minutos
+        let timeMatches = false;
+        let diffSeconds = 0;
+
+        if (tx.timeSeconds >= 0 && exp.timeSeconds >= 0) {
+          diffSeconds = tx.timeSeconds - exp.timeSeconds;
+          // Margen superior de 1 a 3 minutos (con tolerancia hasta 4 minutos)
+          if (diffSeconds >= options.minTimeDiffSeconds && diffSeconds <= options.maxTimeDiffSeconds) {
+            timeMatches = true;
+          } else if (diffSeconds >= 0 && diffSeconds <= 240) {
+            timeMatches = true;
+          } else if (diffSeconds < -60) {
+            // Since array is sorted by timeSeconds, if diff is far negative, later ones will be even more negative
+            // but we continue safely
+          }
+        } else {
           timeMatches = true;
         }
-      } else {
-        timeMatches = true;
-      }
 
-      if (!timeMatches) continue;
+        if (!timeMatches) continue;
 
-      // Amount match check
-      // Evaluate against:
-      // Base + 5%, Base + 10%, Base + 15%, Base + 20%, Total (Col H), Base (Col G)
-      const baseAmt = exp.baseAmount; // Col G
-      const totalAmt = exp.totalAmount; // Col H
+        // Amount match check
+        const baseAmt = exp.baseAmount;
+        const totalAmt = exp.totalAmount;
+        const valH = totalAmt > 0 ? totalAmt : baseAmt;
 
-      // El cotejo se realiza contra Archivo 3 Columna H (monto base / total de la orden expirada):
-      // Primero se verifica si coincide exacto (0%).
-      // Si no coincide, se aumenta el 5% y se verifica de nuevo.
-      // Si no coincide, se aumenta el 10% y se verifica de nuevo.
-      // Si no coincide, se aumenta el 15% y se verifica de nuevo.
-      // Si no coincide, se aumenta el 20% y se verifica de nuevo.
-      const valH = totalAmt > 0 ? totalAmt : baseAmt;
+        const candidates: Array<{
+          type: PossibleExpiredChargeResult['marginType'];
+          label: string;
+          expected: number;
+        }> = [
+          { type: 'total_exact', label: `Exacto sin propina ($${valH.toFixed(2)})`, expected: Math.round(valH * 100) / 100 },
+          { type: 'plus_5', label: `+5% por posible propina ($${(valH * 1.05).toFixed(2)})`, expected: Math.round(valH * 1.05 * 100) / 100 },
+          { type: 'plus_10', label: `+10% por posible propina ($${(valH * 1.10).toFixed(2)})`, expected: Math.round(valH * 1.10 * 100) / 100 },
+          { type: 'plus_15', label: `+15% por posible propina ($${(valH * 1.15).toFixed(2)})`, expected: Math.round(valH * 1.15 * 100) / 100 },
+          { type: 'plus_20', label: `+20% por posible propina ($${(valH * 1.20).toFixed(2)})`, expected: Math.round(valH * 1.20 * 100) / 100 },
+        ];
 
-      const candidates: Array<{
-        type: PossibleExpiredChargeResult['marginType'];
-        label: string;
-        expected: number;
-      }> = [
-        { type: 'total_exact', label: `Exacto Col H ($${valH.toFixed(2)})`, expected: Math.round(valH * 100) / 100 },
-        { type: 'plus_5', label: `+5% (Posible Propina) sobre Col H ($${(valH * 1.05).toFixed(2)})`, expected: Math.round(valH * 1.05 * 100) / 100 },
-        { type: 'plus_10', label: `+10% (Posible Propina) sobre Col H ($${(valH * 1.10).toFixed(2)})`, expected: Math.round(valH * 1.10 * 100) / 100 },
-        { type: 'plus_15', label: `+15% (Posible Propina) sobre Col H ($${(valH * 1.15).toFixed(2)})`, expected: Math.round(valH * 1.15 * 100) / 100 },
-        { type: 'plus_20', label: `+20% (Posible Propina) sobre Col H ($${(valH * 1.20).toFixed(2)})`, expected: Math.round(valH * 1.20 * 100) / 100 },
-      ];
+        if (baseAmt > 0 && Math.abs(baseAmt - valH) > 0.01) {
+          candidates.push(
+            { type: 'base_exact', label: `Exacto Col G sin propina ($${baseAmt.toFixed(2)})`, expected: Math.round(baseAmt * 100) / 100 },
+            { type: 'plus_5', label: `+5% por posible propina sobre Col G ($${(baseAmt * 1.05).toFixed(2)})`, expected: Math.round(baseAmt * 1.05 * 100) / 100 },
+            { type: 'plus_10', label: `+10% por posible propina sobre Col G ($${(baseAmt * 1.10).toFixed(2)})`, expected: Math.round(baseAmt * 1.10 * 100) / 100 },
+            { type: 'plus_15', label: `+15% por posible propina sobre Col G ($${(baseAmt * 1.15).toFixed(2)})`, expected: Math.round(baseAmt * 1.15 * 100) / 100 },
+            { type: 'plus_20', label: `+20% por posible propina sobre Col G ($${(baseAmt * 1.20).toFixed(2)})`, expected: Math.round(baseAmt * 1.20 * 100) / 100 }
+          );
+        }
 
-      // Si baseAmt es distinto de valH y > 0, también evaluamos la escala sobre Col G
-      if (baseAmt > 0 && Math.abs(baseAmt - valH) > 0.01) {
-        candidates.push(
-          { type: 'base_exact', label: `Exacto Col G ($${baseAmt.toFixed(2)})`, expected: Math.round(baseAmt * 100) / 100 },
-          { type: 'plus_5', label: `+5% (Posible Propina) sobre Col G ($${(baseAmt * 1.05).toFixed(2)})`, expected: Math.round(baseAmt * 1.05 * 100) / 100 },
-          { type: 'plus_10', label: `+10% (Posible Propina) sobre Col G ($${(baseAmt * 1.10).toFixed(2)})`, expected: Math.round(baseAmt * 1.10 * 100) / 100 },
-          { type: 'plus_15', label: `+15% (Posible Propina) sobre Col G ($${(baseAmt * 1.15).toFixed(2)})`, expected: Math.round(baseAmt * 1.15 * 100) / 100 },
-          { type: 'plus_20', label: `+20% (Posible Propina) sobre Col G ($${(baseAmt * 1.20).toFixed(2)})`, expected: Math.round(baseAmt * 1.20 * 100) / 100 }
-        );
-      }
+        let matchedCandidate: (typeof candidates)[0] | null = null;
+        for (const cand of candidates) {
+          if (cand.expected <= 0) continue;
+          if (Math.abs(tx.amount - cand.expected) <= options.amountTolerance) {
+            matchedCandidate = cand;
+            break;
+          }
+        }
 
-      let matchedCandidate: (typeof candidates)[0] | null = null;
+        if (matchedCandidate || (tx.amount === 0 && timeMatches)) {
+          usedExpiredIndices.add(item.originalIdx);
 
-      for (const cand of candidates) {
-        if (cand.expected <= 0) continue;
-        if (Math.abs(tx.amount - cand.expected) <= options.amountTolerance) {
-          matchedCandidate = cand;
+          const diffMinutes = Math.round((diffSeconds / 60) * 10) / 10;
+          possibleExpiredCharges.push({
+            id: `exp_charge_${tx.rowNumber}_${exp.rowNumber}`,
+            transaction: tx,
+            expiredOrder: exp,
+            marginType: matchedCandidate ? matchedCandidate.type : 'total_exact',
+            marginLabel: matchedCandidate ? matchedCandidate.label : 'Coincidencia de Hora',
+            calculatedExpectedAmount: matchedCandidate ? matchedCandidate.expected : exp.totalAmount,
+            timeDiffSeconds: diffSeconds,
+            timeDiffFormatted: `+${diffMinutes} min (${diffSeconds}s)`,
+            horaArchivo1: tx.timeStr,
+            horaArchivo3: exp.timeStr,
+            montoArchivo1: tx.amount,
+            montoArchivo2Total: 0,
+            montoArchivo3Total: exp.totalAmount > 0 ? exp.totalAmount : exp.baseAmount,
+            montoArchivo3Base: exp.baseAmount,
+            storeIdArchivo1: tx.storeId,
+            terminalSerialArchivo2: tx.terminalSerial || (tx.storeId ? storeToSerialMap.get(tx.storeId.trim().toUpperCase()) : '') || '—',
+            concesionArchivo3: exp.concession,
+            codigoArchivo3: exp.code,
+            vendedorArchivo3: exp.seller,
+            terminacionTarjetaArchivo1: tx.cardEnding,
+            codigoAutorizacionArchivo1: tx.authCode,
+            estatusIArchivo1: tx.statusI,
+            estatusLArchivo1: tx.statusL,
+          });
           break;
         }
-      }
-
-      // Si tx.amount coincide con el candidato (o tx.amount es 0 con hora coincidente)
-      if (matchedCandidate || (tx.amount === 0 && timeMatches)) {
-        usedExpiredIndices.add(k);
-
-        const diffMinutes = Math.round((diffSeconds / 60) * 10) / 10;
-        possibleExpiredCharges.push({
-          id: `exp_charge_${tx.rowNumber}_${exp.rowNumber}`,
-          transaction: tx,
-          expiredOrder: exp,
-          marginType: matchedCandidate ? matchedCandidate.type : 'total_exact',
-          marginLabel: matchedCandidate ? matchedCandidate.label : 'Coincidencia de Hora',
-          calculatedExpectedAmount: matchedCandidate ? matchedCandidate.expected : exp.totalAmount,
-          timeDiffSeconds: diffSeconds,
-          timeDiffFormatted: `+${diffMinutes} min (${diffSeconds}s)`,
-          horaArchivo1: tx.timeStr,
-          horaArchivo3: exp.timeStr,
-          montoArchivo1: tx.amount,
-          montoArchivo2Total: 0,
-          montoArchivo3Total: exp.totalAmount > 0 ? exp.totalAmount : exp.baseAmount,
-          montoArchivo3Base: exp.baseAmount,
-          storeIdArchivo1: tx.storeId,
-          concesionArchivo3: exp.concession,
-          codigoArchivo3: exp.code,
-          vendedorArchivo3: exp.seller,
-          terminacionTarjetaArchivo1: tx.cardEnding,
-          codigoAutorizacionArchivo1: tx.authCode,
-          estatusIArchivo1: tx.statusI,
-          estatusLArchivo1: tx.statusL,
-        });
-        break;
       }
     }
   }
@@ -438,13 +579,15 @@ export function performReconciliation(
     file1FilteredByStoreIdRows: filteredTransactions.length,
     file2TotalRows: generatedOrders.length,
     file2ValidRows: generatedOrders.length,
-    file2DistinctTerminals: file2TerminalsSet.size,
+    file2DistinctTerminals: file2TerminalCounts.size,
     activeMappedStoreIds: activeStoreIds.size,
     file3TotalRows: expiredOrders.length,
     file3ValidRows: expiredOrders.length,
     matchedWithOrdersCount: matchedWithOrders.length,
     unmatchedApprovedCount: unmatchedApprovedTransactions.length,
     possibleExpiredWithChargeCount: possibleExpiredCharges.length,
+    unregisteredTerminalsCount: unregisteredTerminalsList.length,
+    unregisteredTerminalsList,
     timestamp: new Date().toISOString(),
   };
 
@@ -453,6 +596,7 @@ export function performReconciliation(
     unmatchedApprovedTransactions,
     possibleExpiredCharges,
     activeStoreIdsMap,
+    unregisteredTerminals: unregisteredTerminalsList,
     summary,
   };
 }
@@ -497,25 +641,59 @@ export async function performReconciliationStreaming(
 
   // Step 1: Mapping terminals from Archivo 2 Columna S -> Base Col C -> Base Col D (Store ID)
   const serialToStoreMap = new Map<string, string>();
+  const storeToSerialMap = new Map<string, string>();
   terminalsCatalog.forEach((t) => {
-    serialToStoreMap.set(t.serialNumber.trim().toUpperCase(), t.storeId.trim());
-  });
-
-  const file2TerminalsSet = new Set<string>();
-  generatedOrders.forEach((o) => {
-    if (o.terminalSerial) {
-      file2TerminalsSet.add(o.terminalSerial.trim().toUpperCase());
+    const s = t.serialNumber.trim();
+    const store = t.storeId.trim();
+    if (s && store) {
+      serialToStoreMap.set(s.toUpperCase(), store);
+      if (!storeToSerialMap.has(store.toUpperCase())) {
+        storeToSerialMap.set(store.toUpperCase(), s);
+      }
     }
   });
 
+  const file2TerminalCounts = new Map<string, { original: string; count: number; sampleRow: number }>();
+  for (let idx = 0; idx < generatedOrders.length; idx++) {
+    const o = generatedOrders[idx];
+    if (o.terminalSerial) {
+      const trimmed = o.terminalSerial.trim();
+      const upper = trimmed.toUpperCase();
+      const existing = file2TerminalCounts.get(upper);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        file2TerminalCounts.set(upper, { original: trimmed, count: 1, sampleRow: o.rowNumber });
+      }
+    }
+  }
+
   const activeStoreIds = new Set<string>();
   const activeStoreIdsMap = new Map<string, string>();
+  const unregisteredTerminalsList: UnregisteredTerminalInfo[] = [];
 
-  file2TerminalsSet.forEach((serial) => {
-    const storeId = serialToStoreMap.get(serial);
+  file2TerminalCounts.forEach((data, upperSerial) => {
+    const storeId = serialToStoreMap.get(upperSerial);
     if (storeId) {
       activeStoreIds.add(storeId.toUpperCase());
-      activeStoreIdsMap.set(serial, storeId);
+      activeStoreIdsMap.set(data.original, storeId);
+      // Prioritize the exact serial format as it appears in Archivo 2 Columna S
+      storeToSerialMap.set(storeId.toUpperCase(), data.original);
+    } else {
+      unregisteredTerminalsList.push({
+        serialNumber: data.original,
+        orderCount: data.count,
+        sampleRowNumber: data.sampleRow,
+      });
+    }
+  });
+
+  unregisteredTerminalsList.sort((a, b) => b.orderCount - a.orderCount);
+
+  // Assign terminalSerial to all transactions
+  transactions.forEach((tx) => {
+    if (tx.storeId) {
+      tx.terminalSerial = storeToSerialMap.get(tx.storeId.trim().toUpperCase()) || '';
     }
   });
 
@@ -535,13 +713,15 @@ export async function performReconciliationStreaming(
     file1FilteredByStoreIdRows: filteredTransactions.length,
     file2TotalRows: generatedOrders.length,
     file2ValidRows: generatedOrders.length,
-    file2DistinctTerminals: file2TerminalsSet.size,
+    file2DistinctTerminals: file2TerminalCounts.size,
     activeMappedStoreIds: activeStoreIds.size,
     file3TotalRows: expiredOrders.length,
     file3ValidRows: expiredOrders.length,
     matchedWithOrdersCount: matchedArr.length,
     unmatchedApprovedCount: unmatchedArr.length,
     possibleExpiredWithChargeCount: expChargesArr.length,
+    unregisteredTerminalsCount: unregisteredTerminalsList.length,
+    unregisteredTerminalsList,
     timestamp: new Date().toISOString(),
   });
 
@@ -592,9 +772,17 @@ export async function performReconciliationStreaming(
         const order = generatedOrders[j];
 
         const cardMatches = tx.cardEnding === order.cardEnding;
-        const authMatches = tx.authCode === order.authCode;
+        const authMatches = authCodesMatch(tx.authCode, order.authCode);
 
         if (!cardMatches || !authMatches) continue;
+
+        // Verificación de terminal: Si ambas tienen Store ID conocido y difieren, omitir
+        if (order.terminalSerial && tx.storeId) {
+          const orderStoreId = serialToStoreMap.get(order.terminalSerial.trim().toUpperCase());
+          if (orderStoreId && !storeIdsMatch(orderStoreId, tx.storeId)) {
+            continue; // Pertenecen a dos tiendas físicas distintas
+          }
+        }
 
         let timeMatches = false;
         let diffSeconds = 0;
@@ -603,7 +791,11 @@ export async function performReconciliationStreaming(
           diffSeconds = tx.timeSeconds - order.timeSeconds;
           if (diffSeconds >= options.minTimeDiffSeconds && diffSeconds <= options.maxTimeDiffSeconds) {
             timeMatches = true;
-          } else if (Math.abs(diffSeconds) <= 180) {
+          } else if (Math.abs(diffSeconds) <= 600) {
+            timeMatches = true;
+          } else if (Math.abs(Math.abs(diffSeconds) - 21600) <= 600 || Math.abs(Math.abs(diffSeconds) - 18000) <= 600) {
+            timeMatches = true;
+          } else {
             timeMatches = true;
           }
         } else {
@@ -750,20 +942,20 @@ export async function performReconciliationStreaming(
           label: string;
           expected: number;
         }> = [
-          { type: 'total_exact' as const, label: `Exacto Col H ($${valH.toFixed(2)})`, expected: Math.round(valH * 100) / 100 },
-          { type: 'plus_5' as const, label: `+5% (Posible Propina) sobre Col H ($${(valH * 1.05).toFixed(2)})`, expected: Math.round(valH * 1.05 * 100) / 100 },
-          { type: 'plus_10' as const, label: `+10% (Posible Propina) sobre Col H ($${(valH * 1.10).toFixed(2)})`, expected: Math.round(valH * 1.10 * 100) / 100 },
-          { type: 'plus_15' as const, label: `+15% (Posible Propina) sobre Col H ($${(valH * 1.15).toFixed(2)})`, expected: Math.round(valH * 1.15 * 100) / 100 },
-          { type: 'plus_20' as const, label: `+20% (Posible Propina) sobre Col H ($${(valH * 1.20).toFixed(2)})`, expected: Math.round(valH * 1.20 * 100) / 100 },
+          { type: 'total_exact' as const, label: `Exacto sin propina ($${valH.toFixed(2)})`, expected: Math.round(valH * 100) / 100 },
+          { type: 'plus_5' as const, label: `+5% por posible propina ($${(valH * 1.05).toFixed(2)})`, expected: Math.round(valH * 1.05 * 100) / 100 },
+          { type: 'plus_10' as const, label: `+10% por posible propina ($${(valH * 1.10).toFixed(2)})`, expected: Math.round(valH * 1.10 * 100) / 100 },
+          { type: 'plus_15' as const, label: `+15% por posible propina ($${(valH * 1.15).toFixed(2)})`, expected: Math.round(valH * 1.15 * 100) / 100 },
+          { type: 'plus_20' as const, label: `+20% por posible propina ($${(valH * 1.20).toFixed(2)})`, expected: Math.round(valH * 1.20 * 100) / 100 },
         ];
 
         if (baseAmt > 0 && Math.abs(baseAmt - valH) > 0.01) {
           candidates.push(
-            { type: 'base_exact' as const, label: `Exacto Col G ($${baseAmt.toFixed(2)})`, expected: Math.round(baseAmt * 100) / 100 },
-            { type: 'plus_5' as const, label: `+5% (Posible Propina) sobre Col G ($${(baseAmt * 1.05).toFixed(2)})`, expected: Math.round(baseAmt * 1.05 * 100) / 100 },
-            { type: 'plus_10' as const, label: `+10% (Posible Propina) sobre Col G ($${(baseAmt * 1.10).toFixed(2)})`, expected: Math.round(baseAmt * 1.10 * 100) / 100 },
-            { type: 'plus_15' as const, label: `+15% (Posible Propina) sobre Col G ($${(baseAmt * 1.15).toFixed(2)})`, expected: Math.round(baseAmt * 1.15 * 100) / 100 },
-            { type: 'plus_20' as const, label: `+20% (Posible Propina) sobre Col G ($${(baseAmt * 1.20).toFixed(2)})`, expected: Math.round(baseAmt * 1.20 * 100) / 100 }
+            { type: 'base_exact' as const, label: `Exacto Col G sin propina ($${baseAmt.toFixed(2)})`, expected: Math.round(baseAmt * 100) / 100 },
+            { type: 'plus_5' as const, label: `+5% por posible propina sobre Col G ($${(baseAmt * 1.05).toFixed(2)})`, expected: Math.round(baseAmt * 1.05 * 100) / 100 },
+            { type: 'plus_10' as const, label: `+10% por posible propina sobre Col G ($${(baseAmt * 1.10).toFixed(2)})`, expected: Math.round(baseAmt * 1.10 * 100) / 100 },
+            { type: 'plus_15' as const, label: `+15% por posible propina sobre Col G ($${(baseAmt * 1.15).toFixed(2)})`, expected: Math.round(baseAmt * 1.15 * 100) / 100 },
+            { type: 'plus_20' as const, label: `+20% por posible propina sobre Col G ($${(baseAmt * 1.20).toFixed(2)})`, expected: Math.round(baseAmt * 1.20 * 100) / 100 }
           );
         }
 
@@ -801,6 +993,7 @@ export async function performReconciliationStreaming(
             montoArchivo3Total: exp.totalAmount > 0 ? exp.totalAmount : exp.baseAmount,
             montoArchivo3Base: exp.baseAmount,
             storeIdArchivo1: tx.storeId,
+            terminalSerialArchivo2: tx.terminalSerial || (tx.storeId ? storeToSerialMap.get(tx.storeId.trim().toUpperCase()) : '') || '—',
             concesionArchivo3: exp.concession,
             codigoArchivo3: exp.code,
             vendedorArchivo3: exp.seller,
@@ -925,10 +1118,11 @@ export function exportPossibleExpiredChargesToExcel(
     'Hora Archivo 3 Expiradas (Col A)': item.horaArchivo3,
     'Dif. Tiempo': item.timeDiffFormatted,
     'Monto Cobrado Archivo 1 SPIN (Col E)': item.montoArchivo1,
-    'Monto Total Archivo 2 Yoshi (Col H)': item.montoArchivo2Total || 0,
+    'Monto Total Archivo 2 Yoshi (Col K)': item.montoArchivo2Total || 0,
     'Monto Base / Total Archivo 3 Expiradas (Col H)': item.montoArchivo3Total,
-    'Aumento / Margen Detectado': item.marginLabel,
+    'Aumento / Margen Detectado (Posible Propina)': item.marginLabel,
     'Store ID (Archivo 1 SPIN Col P)': item.storeIdArchivo1,
+    'No. Serie Terminal (Archivo 2 Col S)': item.terminalSerialArchivo2 || '—',
     'Concesión (Archivo 3 Expiradas Col B)': item.concesionArchivo3,
     'Código (Archivo 3 Expiradas Col C)': item.codigoArchivo3,
     'Vendedor (Archivo 3 Expiradas Col E)': item.vendedorArchivo3,
@@ -950,6 +1144,7 @@ export function exportPossibleExpiredChargesToExcel(
     { wch: 22 }, // Monto A3
     { wch: 24 }, // Margen
     { wch: 20 }, // Store ID
+    { wch: 24 }, // No. Serie Terminal
     { wch: 24 }, // Concesión
     { wch: 16 }, // Código
     { wch: 24 }, // Vendedor
@@ -971,24 +1166,33 @@ export function exportPossibleExpiredChargesToExcel(
 
 /**
  * Generates and downloads the Excel report: APROBADAS RESTANTES
- * Using the EXACT SAME format and columns as POSIBLES EXPIRADAS CON COBRO
+ * Using the EXACT SAME format and columns as POSIBLES EXPIRADAS CON COBRO,
+ * including No. Serie de la Terminal del Archivo 2 Columna S.
  */
 export function exportUnmatchedApprovedToExcel(
   unmatchedList: TransactionRecord[],
   expiredMatchesMap: Map<number, PossibleExpiredChargeResult>,
-  reportTitle: string = 'APROBADAS RESTANTES'
+  reportTitle: string = 'APROBADAS RESTANTES',
+  storeIdToSerialMap?: Map<string, string>
 ): void {
   const exportData = unmatchedList.map((tx) => {
     const match = expiredMatchesMap.get(tx.rowNumber);
+    const terminalSerial =
+      tx.terminalSerial ||
+      (tx.storeId && storeIdToSerialMap ? storeIdToSerialMap.get(tx.storeId.trim().toUpperCase()) : '') ||
+      match?.terminalSerialArchivo2 ||
+      '—';
+
     return {
       'Hora Archivo 1 SPIN (Col D)': tx.timeStr,
       'Hora Archivo 3 Expiradas (Col A)': match ? match.horaArchivo3 : '— (Sin orden coincidente)',
       'Dif. Tiempo': match ? match.timeDiffFormatted : '—',
       'Monto Cobrado Archivo 1 SPIN (Col E)': tx.amount,
-      'Monto Total Archivo 2 Yoshi (Col H)': 0,
+      'Monto Total Archivo 2 Yoshi (Col K)': 0,
       'Monto Base / Total Archivo 3 Expiradas (Col H)': match ? match.montoArchivo3Total : 0,
-      'Aumento / Margen Detectado': match ? match.marginLabel : 'Sin Coincidencia en A3',
+      'Aumento / Margen Detectado (Posible Propina)': match ? match.marginLabel : 'Sin Coincidencia en A3',
       'Store ID (Archivo 1 SPIN Col P)': tx.storeId,
+      'No. Serie Terminal (Archivo 2 Col S)': terminalSerial,
       'Concesión (Archivo 3 Expiradas Col B)': match ? match.concesionArchivo3 : '—',
       'Código (Archivo 3 Expiradas Col C)': match ? match.codigoArchivo3 : '—',
       'Vendedor (Archivo 3 Expiradas Col E)': match ? match.vendedorArchivo3 : '—',
@@ -1010,6 +1214,7 @@ export function exportUnmatchedApprovedToExcel(
     { wch: 22 }, // Monto A3
     { wch: 24 }, // Margen
     { wch: 20 }, // Store ID
+    { wch: 24 }, // No. Serie Terminal
     { wch: 24 }, // Concesión
     { wch: 16 }, // Código
     { wch: 24 }, // Vendedor

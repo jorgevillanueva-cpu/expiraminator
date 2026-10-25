@@ -15,6 +15,7 @@ import {
   Hash,
   ArrowRight,
   ShieldAlert,
+  Workflow,
 } from 'lucide-react';
 import {
   MatchedOrderResult,
@@ -22,11 +23,14 @@ import {
   ReconciliationSummary,
   TransactionRecord,
   ReconciliationProgressState,
+  UnregisteredTerminalInfo,
 } from '../types';
 import {
   exportPossibleExpiredChargesToExcel,
   exportUnmatchedApprovedToExcel,
 } from '../utils/reconciler';
+import { ComparisonFlowDiagramModal } from './ComparisonFlowDiagramModal';
+import { UnregisteredTerminalsAlert } from './UnregisteredTerminalsAlert';
 
 interface ResultsDisplayProps {
   summary: ReconciliationSummary;
@@ -37,6 +41,10 @@ interface ResultsDisplayProps {
   onReset: () => void;
   isRealTimeActive?: boolean;
   progressState?: ReconciliationProgressState;
+  unregisteredTerminals?: UnregisteredTerminalInfo[];
+  onRegisterTerminalSingle?: (serial: string, storeId: string) => Promise<void>;
+  onRegisterTerminalBatch?: (items: Array<{ serialNumber: string; storeId: string }>) => Promise<void>;
+  onGoToTerminalsTab?: () => void;
 }
 
 export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
@@ -48,12 +56,18 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
   onReset,
   isRealTimeActive = true,
   progressState,
+  unregisteredTerminals = [],
+  onRegisterTerminalSingle,
+  onRegisterTerminalBatch,
+  onGoToTerminalsTab,
 }) => {
   const [subTab, setSubTab] = useState<'matched_orders' | 'unmatched_approved' | 'expired_charges' | 'terminals_mapped'>('matched_orders');
   const [searchQuery, setSearchQuery] = useState('');
   const [filterMargin, setFilterMargin] = useState<string>('all');
   const [selectedItem, setSelectedItem] = useState<PossibleExpiredChargeResult | null>(null);
   const [showExplanationModal, setShowExplanationModal] = useState(false);
+  const [showDiagramModal, setShowDiagramModal] = useState(false);
+  const [showUnregisteredModal, setShowUnregisteredModal] = useState(false);
 
   const handleDownloadExcel = () => {
     exportPossibleExpiredChargesToExcel(possibleExpiredCharges, 'POSIBLES EXPIRADAS CON COBRO');
@@ -115,59 +129,155 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
     }
   };
 
-  // Filter matched orders
-  const filteredMatchedOrders = matchedWithOrders.filter((item) => {
+  // Pagination states for high-speed buttery smooth rendering (prevents browser lockups)
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+
+  // Reset page when subTab, search, or filter changes
+  React.useEffect(() => {
+    setPage(1);
+  }, [subTab, searchQuery, filterMargin]);
+
+  // Memoized Filtered matched orders
+  const filteredMatchedOrders = React.useMemo(() => {
+    if (!searchQuery.trim()) return matchedWithOrders;
+    const query = searchQuery.toLowerCase().trim();
+    return matchedWithOrders.filter((item) => {
+      return (
+        item.transaction.cardEnding.includes(query) ||
+        item.transaction.authCode.toLowerCase().includes(query) ||
+        item.transaction.storeId.toLowerCase().includes(query) ||
+        item.generatedOrder.terminalSerial.toLowerCase().includes(query)
+      );
+    });
+  }, [matchedWithOrders, searchQuery]);
+
+  // Memoized Filtered unmatched approved transactions
+  const filteredUnmatchedApproved = React.useMemo(() => {
+    const searchLower = searchQuery.toLowerCase().trim();
+    return unmatchedApproved.filter((tx) => {
+      const expiredMatch = expiredMatchesByTxRow.get(tx.rowNumber);
+
+      let matchesSearch = true;
+      if (searchLower) {
+        matchesSearch =
+          tx.cardEnding.includes(searchLower) ||
+          tx.authCode.toLowerCase().includes(searchLower) ||
+          tx.storeId.toLowerCase().includes(searchLower) ||
+          tx.timeStr.includes(searchLower) ||
+          (expiredMatch !== undefined && (
+            expiredMatch.concesionArchivo3.toLowerCase().includes(searchLower) ||
+            expiredMatch.codigoArchivo3.toLowerCase().includes(searchLower) ||
+            expiredMatch.vendedorArchivo3.toLowerCase().includes(searchLower) ||
+            expiredMatch.marginLabel.toLowerCase().includes(searchLower)
+          ));
+      }
+
+      let matchesFilter = true;
+      if (filterMargin === 'with_expired') {
+        matchesFilter = !!expiredMatch;
+      } else if (filterMargin === 'without_expired') {
+        matchesFilter = !expiredMatch;
+      } else if (filterMargin !== 'all') {
+        matchesFilter = expiredMatch ? expiredMatch.marginType === filterMargin : false;
+      }
+
+      return matchesSearch && matchesFilter;
+    });
+  }, [unmatchedApproved, expiredMatchesByTxRow, searchQuery, filterMargin]);
+
+  // Memoized Filtered possible expired charges
+  const filteredExpiredCharges = React.useMemo(() => {
+    const searchLower = searchQuery.toLowerCase().trim();
+    return possibleExpiredCharges.filter((item) => {
+      let matchesSearch = true;
+      if (searchLower) {
+        matchesSearch =
+          item.concesionArchivo3.toLowerCase().includes(searchLower) ||
+          item.codigoArchivo3.toLowerCase().includes(searchLower) ||
+          item.vendedorArchivo3.toLowerCase().includes(searchLower) ||
+          item.storeIdArchivo1.toLowerCase().includes(searchLower) ||
+          item.terminacionTarjetaArchivo1.includes(searchLower) ||
+          item.codigoAutorizacionArchivo1.toLowerCase().includes(searchLower);
+      }
+
+      const matchesMargin = filterMargin === 'all' || item.marginType === filterMargin;
+
+      return matchesSearch && matchesMargin;
+    });
+  }, [possibleExpiredCharges, searchQuery, filterMargin]);
+
+  // Paginated slices: Only render 50 items at a time to keep React at 60 FPS
+  const paginatedMatchedOrders = React.useMemo(() => {
+    const start = (page - 1) * pageSize;
+    return filteredMatchedOrders.slice(start, start + pageSize);
+  }, [filteredMatchedOrders, page, pageSize]);
+
+  const paginatedUnmatchedApproved = React.useMemo(() => {
+    const start = (page - 1) * pageSize;
+    return filteredUnmatchedApproved.slice(start, start + pageSize);
+  }, [filteredUnmatchedApproved, page, pageSize]);
+
+  const paginatedExpiredCharges = React.useMemo(() => {
+    const start = (page - 1) * pageSize;
+    return filteredExpiredCharges.slice(start, start + pageSize);
+  }, [filteredExpiredCharges, page, pageSize]);
+
+  const renderPagination = (totalItems: number) => {
+    const totalPages = Math.ceil(totalItems / pageSize) || 1;
+    if (totalItems === 0) return null;
+    const startItem = (page - 1) * pageSize + 1;
+    const endItem = Math.min(page * pageSize, totalItems);
+
     return (
-      item.transaction.cardEnding.includes(searchQuery) ||
-      item.transaction.authCode.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.transaction.storeId.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.generatedOrder.terminalSerial.toLowerCase().includes(searchQuery.toLowerCase())
+      <div className="flex flex-col sm:flex-row items-center justify-between gap-3 p-3.5 bg-slate-50 border-t border-slate-200 text-xs text-slate-600 font-sans">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span>
+            Mostrando <strong className="text-slate-900 font-mono">{startItem}</strong> -{' '}
+            <strong className="text-slate-900 font-mono">{endItem}</strong> de{' '}
+            <strong className="text-slate-900 font-mono">{totalItems.toLocaleString()}</strong> registros
+          </span>
+          <span className="text-slate-300">|</span>
+          <div className="flex items-center gap-1.5">
+            <span className="text-slate-500 text-[11px] font-semibold">Por página:</span>
+            <select
+              value={pageSize}
+              onChange={(e) => {
+                setPageSize(Number(e.target.value));
+                setPage(1);
+              }}
+              className="bg-white border border-slate-300 rounded-lg px-2 py-0.5 text-xs font-mono font-bold text-slate-800 focus:outline-none"
+            >
+              <option value={25}>25</option>
+              <option value={50}>50</option>
+              <option value={100}>100</option>
+              <option value={250}>250</option>
+            </select>
+          </div>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setPage((p) => Math.max(1, p - 1))}
+            disabled={page === 1}
+            className="px-3 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 disabled:opacity-40 font-bold text-xs transition shadow-2xs"
+          >
+            ← Anterior
+          </button>
+          <span className="px-3 py-1 font-mono font-bold text-slate-800 bg-white border border-slate-200 rounded-lg shadow-2xs">
+            Pág {page} de {totalPages}
+          </span>
+          <button
+            onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+            disabled={page >= totalPages}
+            className="px-3 py-1 rounded-lg border border-slate-300 bg-white hover:bg-slate-100 disabled:opacity-40 font-bold text-xs transition shadow-2xs"
+          >
+            Siguiente →
+          </button>
+        </div>
+      </div>
     );
-  });
-
-  // Filter unmatched approved transactions (exact same filtering power)
-  const filteredUnmatchedApproved = unmatchedApproved.filter((tx) => {
-    const expiredMatch = expiredMatchesByTxRow.get(tx.rowNumber);
-    const searchLower = searchQuery.toLowerCase();
-
-    const matchesSearch =
-      tx.cardEnding.includes(searchQuery) ||
-      tx.authCode.toLowerCase().includes(searchLower) ||
-      tx.storeId.toLowerCase().includes(searchLower) ||
-      tx.timeStr.includes(searchQuery) ||
-      (expiredMatch && (
-        expiredMatch.concesionArchivo3.toLowerCase().includes(searchLower) ||
-        expiredMatch.codigoArchivo3.toLowerCase().includes(searchLower) ||
-        expiredMatch.vendedorArchivo3.toLowerCase().includes(searchLower) ||
-        expiredMatch.marginLabel.toLowerCase().includes(searchLower)
-      ));
-
-    let matchesFilter = true;
-    if (filterMargin === 'with_expired') {
-      matchesFilter = !!expiredMatch;
-    } else if (filterMargin === 'without_expired') {
-      matchesFilter = !expiredMatch;
-    } else if (filterMargin !== 'all') {
-      matchesFilter = expiredMatch ? expiredMatch.marginType === filterMargin : false;
-    }
-
-    return matchesSearch && matchesFilter;
-  });
-
-  // Filter possible expired charges
-  const filteredExpiredCharges = possibleExpiredCharges.filter((item) => {
-    const matchesSearch =
-      item.concesionArchivo3.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.codigoArchivo3.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.vendedorArchivo3.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.storeIdArchivo1.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      item.terminacionTarjetaArchivo1.includes(searchQuery) ||
-      item.codigoAutorizacionArchivo1.toLowerCase().includes(searchQuery.toLowerCase());
-
-    const matchesMargin = filterMargin === 'all' || item.marginType === filterMargin;
-
-    return matchesSearch && matchesMargin;
-  });
+  };
 
   return (
     <div className="space-y-6">
@@ -182,7 +292,13 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
               Cotejo Realizado Rápido en Tiempo Real
             </p>
             <p className="text-slate-500 text-xs">
-              Se procesaron <strong className="text-slate-800 font-mono">{summary.file1TotalRows}</strong> transacciones: <strong className="text-emerald-700 font-mono">{matchedWithOrders.length}</strong> coincidentes en pantalla, <strong className="text-amber-700 font-mono">{unmatchedApproved.length}</strong> aprobadas restantes y <strong className="text-rose-700 font-mono">{possibleExpiredCharges.length}</strong> posibles expiradas con cobro.
+              Se procesaron <strong className="text-slate-800 font-mono">{summary.file1TotalRows}</strong> transacciones bancarias
+              {Boolean(summary.file1CashRowsExcluded && summary.file1CashRowsExcluded > 0) && (
+                <span className="text-slate-500">
+                  {' '}(se descartaron <strong className="text-rose-600 font-mono">{summary.file1CashRowsExcluded}</strong> renglones en efectivo con &quot; - &quot;)
+                </span>
+              )}
+              : <strong className="text-emerald-700 font-mono">{matchedWithOrders.length}</strong> coincidentes en pantalla, <strong className="text-amber-700 font-mono">{unmatchedApproved.length}</strong> aprobadas restantes y <strong className="text-rose-700 font-mono">{possibleExpiredCharges.length}</strong> posibles expiradas con cobro.
             </p>
           </div>
         </div>
@@ -212,9 +328,17 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
               {summary.file1ApprovedRows} aprobadas
             </span>
           </div>
-          <p className="text-[10.5px] text-slate-500 mt-1 font-medium">
-            {summary.file1FilteredByStoreIdRows} en Stores activos
-          </p>
+          <div className="flex items-center justify-between text-[10.5px] text-slate-500 mt-1 font-medium gap-1 flex-wrap">
+            <span>{summary.file1FilteredByStoreIdRows} en Stores activos</span>
+            {Boolean(summary.file1CashRowsExcluded && summary.file1CashRowsExcluded > 0) && (
+              <span
+                className="text-rose-600 font-bold bg-rose-50 px-1.5 py-0.5 rounded border border-rose-200"
+                title="Renglones descartados por tener un ' - ' correspondiente a ventas en efectivo"
+              >
+                -{summary.file1CashRowsExcluded} en efectivo
+              </span>
+            )}
+          </div>
         </div>
 
         {/* Metric 2: Órdenes Detallado */}
@@ -402,6 +526,18 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
               <Building className="w-3.5 h-3.5" />
               <span>Cruce de Terminales ({activeStoreIdsMap.size})</span>
             </button>
+
+            {/* Botón a un lado del cruce de terminales para abrir terminales no registradas */}
+            {unregisteredTerminals.length > 0 && (
+              <button
+                onClick={() => setShowUnregisteredModal(true)}
+                className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-600 text-white shadow-2xs transition"
+                title="Ver terminales del Archivo 2 que no aparecen en la Base de Datos"
+              >
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                <span>⚠️ {unregisteredTerminals.length} No Registradas</span>
+              </button>
+            )}
           </div>
 
           {/* Action buttons */}
@@ -429,11 +565,20 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
             )}
 
             <button
+              onClick={() => setShowDiagramModal(true)}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 shadow-2xs transition"
+              title="Ver diagrama de flujo interactivo paso a paso de las comparaciones entre archivos"
+            >
+              <Workflow className="w-4 h-4 text-indigo-600" />
+              <span>Ver Diagrama de Flujo</span>
+            </button>
+
+            <button
               onClick={() => setShowExplanationModal(true)}
               className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold text-slate-700 bg-white hover:bg-slate-50 border border-slate-200 shadow-2xs transition"
               title="Explicación del flujo de cotejo y qué son las aprobadas restantes"
             >
-              <HelpCircle className="w-4 h-4 text-indigo-600" />
+              <HelpCircle className="w-4 h-4 text-amber-600" />
               <span>¿Qué son las Aprobadas Restantes?</span>
             </button>
           </div>
@@ -469,10 +614,10 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                 <option value="all">Todas ({unmatchedApproved.length})</option>
                 <option value="with_expired">Con orden expirada coincidente ({possibleExpiredCharges.length})</option>
                 <option value="without_expired">Sin orden expirada coincidente ({Math.max(0, unmatchedApproved.length - possibleExpiredCharges.length)})</option>
-                <option value="plus_5">+5% (Posible Propina)</option>
-                <option value="plus_10">+10% (Posible Propina)</option>
-                <option value="plus_15">+15% (Posible Propina)</option>
-                <option value="plus_20">+20% (Posible Propina)</option>
+                <option value="plus_5">+5% por posible propina</option>
+                <option value="plus_10">+10% por posible propina</option>
+                <option value="plus_15">+15% por posible propina</option>
+                <option value="plus_20">+20% por posible propina</option>
                 <option value="total_exact">Total Exacto (Col H)</option>
                 <option value="base_exact">Monto Base Exacto (Col H)</option>
               </select>
@@ -481,17 +626,17 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
 
           {subTab === 'expired_charges' && (
             <div className="flex items-center gap-2 self-start sm:self-auto">
-              <span className="text-slate-500 text-[11px] font-semibold">Margen / Propina:</span>
+              <span className="text-slate-500 text-[11px] font-semibold">Margen de posible propina:</span>
               <select
                 value={filterMargin}
                 onChange={(e) => setFilterMargin(e.target.value)}
                 className="bg-slate-50 border border-slate-200 rounded-xl px-2.5 py-1.5 text-xs text-slate-700 font-medium focus:outline-none focus:border-rose-500"
               >
-                <option value="all">Todos los márgenes / propinas (+5%, +10%, +15%, +20%, Total)</option>
-                <option value="plus_5">+5% (Posible Propina)</option>
-                <option value="plus_10">+10% (Posible Propina)</option>
-                <option value="plus_15">+15% (Posible Propina)</option>
-                <option value="plus_20">+20% (Posible Propina)</option>
+                <option value="all">Todos los aumentos (+5%, +10%, +15%, +20%, Total)</option>
+                <option value="plus_5">+5% por posible propina</option>
+                <option value="plus_10">+10% por posible propina</option>
+                <option value="plus_15">+15% por posible propina</option>
+                <option value="plus_20">+20% por posible propina</option>
                 <option value="total_exact">Total Exacto (Col H)</option>
                 <option value="base_exact">Monto Base Exacto (Col H)</option>
               </select>
@@ -509,20 +654,14 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                   <strong>Visualización en Pantalla:</strong> Registros coincidentes de Transacciones (SPIN) vs Órdenes (Excel detallado pagos) con estatus Aprobadas en Columnas I y L.
                 </span>
               </div>
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] text-slate-500 font-mono font-medium bg-white px-2 py-0.5 rounded border border-emerald-200">
-                  ↕ Recuadro deslizable
-                </span>
-                <span className="font-mono font-bold bg-white px-2.5 py-1 rounded-lg border border-emerald-200 text-emerald-700 shadow-2xs">
-                  {matchedWithOrders.length} coincidentes
-                </span>
-              </div>
+              <span className="font-mono font-bold bg-white px-2.5 py-1 rounded-lg border border-emerald-200 text-emerald-700 shadow-2xs">
+                {matchedWithOrders.length} coincidentes
+              </span>
             </div>
 
-            {/* Recuadro con barra deslizadora */}
-            <div className="overflow-x-auto overflow-y-auto max-h-[540px] border border-slate-200 bg-white rounded-b-2xl shadow-inner scrollbar-thin">
+            <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
-                <thead className="sticky top-0 z-10 bg-slate-100/95 backdrop-blur-xs text-slate-700 uppercase font-mono tracking-wider border-b border-slate-200 text-[10px] font-bold shadow-2xs">
+                <thead className="bg-slate-50 text-slate-500 uppercase font-mono tracking-wider border-b border-slate-200 text-[10px] font-bold">
                   <tr>
                     <th className="py-3 px-3">#</th>
                     <th className="py-3 px-3">
@@ -530,7 +669,7 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                       <div className="text-slate-400">vs Detallado (Col M)</div>
                     </th>
                     <th className="py-3 px-3">
-                      <div>Código Aut. SPIN (Col Y)</div>
+                      <div>Código Aut. SPIN (Col Z)</div>
                       <div className="text-slate-400">vs Detallado (Col R)</div>
                     </th>
                     <th className="py-3 px-3">
@@ -548,14 +687,50 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                   {filteredMatchedOrders.length === 0 ? (
                     <tr>
                       <td colSpan={9} className="py-12 text-center text-slate-500 font-sans">
-                        <CheckCircle className="w-8 h-8 mx-auto mb-2 text-slate-300" />
-                        <p className="font-bold text-slate-700">No hay coincidencias en este filtro.</p>
+                        {matchedWithOrders.length === 0 ? (
+                          <div className="max-w-lg mx-auto space-y-3">
+                            <div className="w-12 h-12 rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center mx-auto">
+                              <AlertTriangle className="w-6 h-6" />
+                            </div>
+                            <p className="font-extrabold text-base text-slate-900">
+                              No se encontraron cobros coincidentes entre el Archivo 1 y el Archivo 2
+                            </p>
+                            <p className="text-xs text-slate-600 leading-relaxed">
+                              El sistema cotejó las transacciones bancarias contra las órdenes generadas buscando coincidencia en <strong>Tarjeta (últimos 4 dígitos)</strong> y <strong>Código de Autorización</strong>.
+                            </p>
+                            <div className="p-4 bg-amber-50/80 rounded-2xl border border-amber-200 text-left text-xs text-amber-900 space-y-2">
+                              <p className="font-bold text-amber-950 uppercase tracking-wide text-[10px]">Diagnóstico de Coincidencia:</p>
+                              <ul className="list-disc list-inside space-y-1 text-[11px] text-amber-800">
+                                <li>Revisa la pestaña <strong>"Aprobadas Restantes"</strong>: si el dinero se cobró pero Yoshi no generó orden, aparecerá ahí.</li>
+                                <li>Verifica que el Archivo 1 y el Archivo 2 correspondan a la misma fecha o evento.</li>
+                                <li>En el Archivo 1 (SPIN), las transacciones deben tener estatus <strong>Aprobada</strong> en las Columnas I o L.</li>
+                                <li>En la pestaña <strong>"Cruce de Terminales"</strong>, verifica que los números de serie de las terminales estén en la base de datos.</li>
+                              </ul>
+                            </div>
+                          </div>
+                        ) : (
+                          <div className="space-y-2">
+                            <Search className="w-8 h-8 mx-auto mb-1 text-slate-300" />
+                            <p className="font-bold text-slate-800">
+                              Ningún cobro coincide con la búsqueda "{searchQuery}"
+                            </p>
+                            <p className="text-xs text-slate-500">
+                              Hay {matchedWithOrders.length} cobros coincidentes en total en este evento.
+                            </p>
+                            <button
+                              onClick={() => setSearchQuery('')}
+                              className="mt-2 px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition shadow-2xs"
+                            >
+                              Limpiar búsqueda
+                            </button>
+                          </div>
+                        )}
                       </td>
                     </tr>
                   ) : (
-                    filteredMatchedOrders.map((item, idx) => (
+                    paginatedMatchedOrders.map((item, idx) => (
                       <tr key={item.id} className="hover:bg-slate-50/80 transition">
-                        <td className="py-3 px-3 text-slate-400">{idx + 1}</td>
+                        <td className="py-3 px-3 text-slate-400">{(page - 1) * pageSize + idx + 1}</td>
                         <td className="py-3 px-3">
                           <span className="font-bold text-emerald-700">
                             ****{item.transaction.cardEnding}
@@ -597,6 +772,7 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                 </tbody>
               </table>
             </div>
+            {renderPagination(filteredMatchedOrders.length)}
           </div>
         )}
 
@@ -611,20 +787,14 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                   <strong>Aprobadas Restantes (Sin Orden en A2):</strong> Transacciones de SPIN (Archivo 1) con estatus Aprobadas (Cols I y L) de terminales activas que no generaron orden de venta en Archivo 2, cotejadas con Archivo 3 (Expiradas).
                 </span>
               </div>
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] text-slate-500 font-mono font-medium bg-white px-2 py-0.5 rounded border border-amber-300">
-                  ↕ Recuadro deslizable
-                </span>
-                <span className="font-mono font-bold bg-white px-2.5 py-1 rounded-lg border border-amber-300 text-amber-800 shadow-2xs">
-                  {unmatchedApproved.length} transacciones
-                </span>
-              </div>
+              <span className="font-mono font-bold bg-white px-2.5 py-1 rounded-lg border border-amber-300 text-amber-800 shadow-2xs">
+                {unmatchedApproved.length} transacciones
+              </span>
             </div>
 
-            {/* Recuadro con barra deslizadora */}
-            <div className="overflow-x-auto overflow-y-auto max-h-[540px] border border-slate-200 bg-white rounded-b-2xl shadow-inner scrollbar-thin">
+            <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
-                <thead className="sticky top-0 z-10 bg-slate-100/95 backdrop-blur-xs text-slate-700 uppercase font-mono tracking-wider border-b border-slate-200 text-[10px] font-bold shadow-2xs">
+                <thead className="bg-slate-50 text-slate-500 uppercase font-mono tracking-wider border-b border-slate-200 text-[10px] font-bold">
                   <tr>
                     <th className="py-3 px-3">#</th>
                     <th className="py-3 px-3">
@@ -636,13 +806,13 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                       <div className="text-rose-600 font-bold">A1 SPIN (Col E)</div>
                       <div className="text-amber-600 font-semibold">A3 Expirada (Col H)</div>
                     </th>
-                    <th className="py-3 px-3">Margen / Propina</th>
+                    <th className="py-3 px-3">Margen Detectado</th>
                     <th className="py-3 px-3">Store ID (P)</th>
                     <th className="py-3 px-3">Concesión (B)</th>
                     <th className="py-3 px-3">Código (C)</th>
                     <th className="py-3 px-3">Vendedor (E)</th>
                     <th className="py-3 px-3">Tarjeta (S)</th>
-                    <th className="py-3 px-3">Código Aut. (Y)</th>
+                    <th className="py-3 px-3">Código Aut. (Z)</th>
                     <th className="py-3 px-3">Estatus (I / L)</th>
                     <th className="py-3 px-3 text-right">Ver</th>
                   </tr>
@@ -661,7 +831,7 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                       </td>
                     </tr>
                   ) : (
-                    filteredUnmatchedApproved.map((tx, idx) => {
+                    paginatedUnmatchedApproved.map((tx, idx) => {
                       const expiredMatch = expiredMatchesByTxRow.get(tx.rowNumber);
                       return (
                         <tr
@@ -671,7 +841,7 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                           }`}
                           onClick={() => handleSelectUnmatched(tx)}
                         >
-                          <td className="py-3 px-3 text-slate-400">{idx + 1}</td>
+                          <td className="py-3 px-3 text-slate-400">{(page - 1) * pageSize + idx + 1}</td>
                           <td className="py-3 px-3">
                             <div className="text-amber-800 font-bold">{tx.timeStr}</div>
                             <div className="text-slate-500 text-[11px]">
@@ -750,33 +920,16 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                 </tbody>
               </table>
             </div>
+            {renderPagination(filteredUnmatchedApproved.length)}
           </div>
         )}
 
         {/* SUBTAB 3: POSIBLES EXPIRADAS CON COBRO */}
         {subTab === 'expired_charges' && (
           <div>
-            <div className="p-3.5 bg-rose-50/70 border-b border-rose-200 text-rose-950 text-xs flex items-center justify-between flex-wrap gap-2">
-              <div className="flex items-center gap-2">
-                <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
-                <span>
-                  <strong>Posibles Expiradas con Cobro:</strong> Órdenes expiradas en Archivo 3 donde un cliente tiene un cargo bancario aprobado coincidente en Archivo 1 (SPIN).
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-[11px] text-slate-500 font-mono font-medium bg-white px-2 py-0.5 rounded border border-rose-200">
-                  ↕ Recuadro deslizable
-                </span>
-                <span className="font-mono font-bold bg-white px-2.5 py-1 rounded-lg border border-rose-300 text-rose-700 shadow-2xs">
-                  {possibleExpiredCharges.length} detectadas
-                </span>
-              </div>
-            </div>
-
-            {/* Recuadro con barra deslizadora */}
-            <div className="overflow-x-auto overflow-y-auto max-h-[540px] border border-slate-200 bg-white rounded-b-2xl shadow-inner scrollbar-thin">
+            <div className="overflow-x-auto">
               <table className="w-full text-left text-xs">
-                <thead className="sticky top-0 z-10 bg-slate-100/95 backdrop-blur-xs text-slate-700 uppercase font-mono tracking-wider border-b border-slate-200 text-[10px] font-bold shadow-2xs">
+              <thead className="bg-slate-50 text-slate-500 uppercase font-mono tracking-wider border-b border-slate-200 text-[10px] font-bold">
                 <tr>
                   <th className="py-3 px-3">#</th>
                   <th className="py-3 px-3">
@@ -788,13 +941,13 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                     <div className="text-rose-600 font-bold">A1 SPIN (Col E)</div>
                     <div className="text-amber-600 font-semibold">A3 Expirada (Col H)</div>
                   </th>
-                  <th className="py-3 px-3">Margen / Propina</th>
+                  <th className="py-3 px-3">Margen Detectado</th>
                   <th className="py-3 px-3">Store ID (P)</th>
                   <th className="py-3 px-3">Concesión (B)</th>
                   <th className="py-3 px-3">Código (C)</th>
                   <th className="py-3 px-3">Vendedor (E)</th>
                   <th className="py-3 px-3">Tarjeta (S)</th>
-                  <th className="py-3 px-3">Código Aut. (Y)</th>
+                  <th className="py-3 px-3">Código Aut. (Z)</th>
                   <th className="py-3 px-3">Estatus (I / L)</th>
                   <th className="py-3 px-3 text-right">Ver</th>
                 </tr>
@@ -815,13 +968,13 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                     </td>
                   </tr>
                 ) : (
-                  filteredExpiredCharges.map((item, idx) => (
+                  paginatedExpiredCharges.map((item, idx) => (
                     <tr
                       key={item.id}
                       className="hover:bg-rose-50/40 transition cursor-pointer"
                       onClick={() => setSelectedItem(item)}
                     >
-                      <td className="py-3 px-3 text-slate-400">{idx + 1}</td>
+                      <td className="py-3 px-3 text-slate-400">{(page - 1) * pageSize + idx + 1}</td>
                       <td className="py-3 px-3">
                         <div className="text-rose-600 font-bold">{item.horaArchivo1}</div>
                         <div className="text-slate-500 text-[11px]">{item.horaArchivo3}</div>
@@ -882,22 +1035,67 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
               </tbody>
             </table>
           </div>
+          {renderPagination(filteredExpiredCharges.length)}
         </div>
       )}
 
-        {/* SUBTAB 4: CRUCE DE TERMINALES */}
-        {subTab === 'terminals_mapped' && (
-          <div className="p-6 bg-white">
+      {/* SUBTAB 4: CRUCE DE TERMINALES */}
+      {subTab === 'terminals_mapped' && (
+        <div className="p-6 bg-white space-y-6">
+          <div>
             <h4 className="text-sm font-bold text-slate-900 mb-2">
               Cadena de Mapeo de Terminales Activas
             </h4>
-            <p className="text-xs text-slate-600 mb-4 leading-relaxed">
+            <p className="text-xs text-slate-600 leading-relaxed">
               El flujo de resolución toma las terminales que tuvieron ventas registradas en el{' '}
-              <strong className="text-slate-900">Archivo 2 [Órdenes Yoshi] (Columna S)</strong>, las busca en la{' '}
-              <strong className="text-indigo-600">Columna C</strong> del catálogo de terminales registradas, obtiene el <strong className="text-indigo-600">ID Store (Columna D)</strong> y con eso
+              <strong className="text-slate-900">Archivo 2 [Excel detallado pagos] (Columna S)</strong>, las busca en la{' '}
+              <strong className="text-indigo-600">Columna C</strong> de la base de datos de terminales,
+              obtiene el <strong className="text-indigo-600">ID Store (Columna D)</strong> y con eso
               filtra las transacciones del <strong className="text-slate-900">Archivo 1 [SPIN] (Columna P)</strong>.
             </p>
+          </div>
 
+          {/* UNREGISTERED TERMINALS COMPACT CARD */}
+          {unregisteredTerminals.length > 0 && (
+            <div className="p-4 rounded-2xl bg-amber-50 border border-amber-300 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-2xs">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-amber-500 text-white flex items-center justify-center shrink-0 shadow-2xs">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h5 className="text-xs font-black text-amber-950 uppercase tracking-wide">
+                    ⚠️ {unregisteredTerminals.length} Terminales en Archivo 2 sin registro en Base de Datos
+                  </h5>
+                  <p className="text-[11px] text-amber-800">
+                    Se detectaron ventas en estas terminales. Puedes asignarles Store ID para integrarlas a la base.
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={() => setShowUnregisteredModal(true)}
+                  className="px-3.5 py-1.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white font-bold text-xs shadow-2xs transition"
+                >
+                  Gestionar y Asignar Store IDs
+                </button>
+                {onGoToTerminalsTab && (
+                  <button
+                    onClick={onGoToTerminalsTab}
+                    className="px-3 py-1.5 rounded-xl bg-white hover:bg-slate-100 text-amber-950 border border-amber-300 font-bold text-xs transition"
+                  >
+                    Ir a Catálogo
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* MAPPED TERMINALS GRID */}
+          <div>
+            <h5 className="text-xs font-bold text-slate-800 uppercase tracking-wide mb-3 flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+              <span>Terminales Enlazadas con Éxito ({activeStoreIdsMap.size})</span>
+            </h5>
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
               {Array.from(activeStoreIdsMap.entries()).map(([serial, storeId]) => (
                 <div
@@ -920,7 +1118,8 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
               ))}
             </div>
           </div>
-        )}
+        </div>
+      )}
       </div>
 
       {/* Explanation Modal */}
@@ -949,14 +1148,14 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
 
             <div className="space-y-3 text-xs text-slate-600 leading-relaxed">
               <p>
-                En el <strong>Paso 1</strong>, el sistema toma las transacciones de <strong>SPIN (Archivo 1)</strong> que corresponden a terminales activas y que tienen estatus <strong>Aprobada</strong> tanto en la <strong>Columna I</strong> como en la <strong>Columna L</strong>.
+                En el <strong>Paso 1</strong>, el sistema descarta automáticamente los renglones que tengan un <strong>&quot; - &quot;</strong> (ya que fueron ventas en efectivo y no transacciones bancarias con tarjeta). Luego filtra las transacciones de <strong>SPIN (Archivo 1)</strong> que correspondan a Store IDs de terminales activas y con estatus <strong>Aprobada</strong> tanto en la <strong>Columna I</strong> como en la <strong>Columna L</strong>.
               </p>
               <p>
                 En el <strong>Paso 2</strong>, esas transacciones aprobadas se cotejan contra las <strong>Órdenes Generadas (Archivo 2)</strong> evaluando:
               </p>
               <ul className="list-disc pl-5 space-y-1 font-mono text-[11.5px] text-slate-700 bg-slate-50 p-3 rounded-xl border border-slate-200">
                 <li>Terminación de tarjeta: Archivo 1 Col S == Archivo 2 Col M</li>
-                <li>Código de autorización: Archivo 1 Col Y == Archivo 2 Col R</li>
+                <li>Código de autorización: Archivo 1 Col Z == Archivo 2 Col R</li>
                 <li>Hora: Archivo 1 Col D vs Archivo 2 Col A con margen superior de 1 a 3 minutos</li>
               </ul>
               <p>
@@ -1050,10 +1249,10 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                 </span>
               </div>
 
-              {/* CARD 2: Archivo 2 Órdenes Yoshi Col H */}
+              {/* CARD 2: Archivo 2 Órdenes Yoshi Col K */}
               <div className="p-3.5 rounded-2xl bg-indigo-50/70 border border-indigo-200">
                 <span className="text-indigo-700 text-[10px] uppercase font-mono font-bold block">
-                  Archivo 2 (Órdenes Yoshi) • Col H
+                  Archivo 2 (Órdenes Yoshi) • Col K
                 </span>
                 <span className="text-xs text-indigo-500 font-medium block mb-1">
                   Monto Total Órdenes Yoshi
@@ -1087,40 +1286,21 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
               </div>
 
               {/* BARRA DE VALIDACIÓN DE CRUCE */}
-              <div className="col-span-2 sm:col-span-3 p-3 rounded-2xl bg-slate-100 border border-slate-200 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs">
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="font-bold text-slate-800 font-mono">Validación de Cruce:</span>
-                    <span className="text-slate-600 font-mono text-[11px]">
-                      Cobrado A1 Col E (${selectedItem.montoArchivo1.toFixed(2)}) vs Yoshi A2 Col H (${(selectedItem.montoArchivo2Total || 0).toFixed(2)}) vs Expirada A3 Col H (${selectedItem.montoArchivo3Total.toFixed(2)})
-                    </span>
-                  </div>
-                  {selectedItem.marginType.startsWith('plus') && (
-                    <p className="text-[11px] text-amber-800 font-semibold flex items-center gap-1.5">
-                      <span className="inline-block w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0"></span>
-                      <span>El porcentaje evaluado ({selectedItem.marginType.replace('plus_', '')}%) es por posible propina</span>
-                    </p>
-                  )}
-                </div>
-                <div className="flex items-center gap-1.5 shrink-0 self-end sm:self-center">
-                  <span className="px-2.5 py-1 rounded-md text-[11px] font-bold font-mono bg-white border border-slate-200 text-slate-800 shadow-2xs">
-                    {selectedItem.marginLabel}
+              <div className="col-span-2 sm:col-span-3 p-3 rounded-2xl bg-slate-100 border border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-2 text-xs">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-bold text-slate-800 font-mono">Validación de Cruce:</span>
+                  <span className="text-slate-600 font-mono text-[11px]">
+                    Cobrado A1 Col E (${selectedItem.montoArchivo1.toFixed(2)}) vs Yoshi A2 Col K (${(selectedItem.montoArchivo2Total || 0).toFixed(2)}) vs Expirada A3 Col H (${selectedItem.montoArchivo3Total.toFixed(2)})
                   </span>
                 </div>
+                <span className="px-2.5 py-0.5 rounded-md text-[11px] font-bold font-mono bg-white border border-slate-200 text-slate-800 shadow-2xs shrink-0">
+                  {selectedItem.marginLabel}
+                </span>
               </div>
 
               <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
-                <span className="text-slate-500 text-[10px] uppercase font-mono font-bold">
-                  {selectedItem.marginType.startsWith('plus')
-                    ? 'Aumento / Posible Propina'
-                    : 'Aumento Detectado'}
-                </span>
+                <span className="text-slate-500 text-[10px] uppercase font-mono font-bold">Aumento Detectado</span>
                 <p className="text-xs font-bold text-emerald-700 font-mono">{selectedItem.marginLabel}</p>
-                {selectedItem.marginType.startsWith('plus') && (
-                  <span className="text-[10px] text-amber-700 font-medium block mt-0.5">
-                    El porcentaje es por posible propina
-                  </span>
-                )}
               </div>
 
               <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
@@ -1164,6 +1344,57 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
               </span>
               <button
                 onClick={() => setSelectedItem(null)}
+                className="px-4 py-2 rounded-xl text-xs bg-slate-900 hover:bg-slate-800 text-white font-bold transition shadow-xs"
+              >
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Comparison Flow Diagram Modal */}
+      <ComparisonFlowDiagramModal
+        isOpen={showDiagramModal}
+        onClose={() => setShowDiagramModal(false)}
+      />
+
+      {/* Modal de Terminales No Registradas */}
+      {showUnregisteredModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/50 backdrop-blur-xs animate-fadeIn">
+          <div className="bg-white border border-slate-200 rounded-3xl w-full max-w-4xl max-h-[90vh] overflow-y-auto p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-extrabold text-slate-900">
+                    Terminales No Registradas en Base de Datos ({unregisteredTerminals.length})
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Asigna Store IDs a las terminales detectadas en Archivo 2 para sincronizarlas con la base de datos
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowUnregisteredModal(false)}
+                className="text-slate-400 hover:text-slate-700 p-1.5 rounded-xl hover:bg-slate-100 font-bold text-sm"
+              >
+                ✕
+              </button>
+            </div>
+
+            <UnregisteredTerminalsAlert
+              unregisteredTerminals={unregisteredTerminals}
+              onRegisterSingle={onRegisterTerminalSingle || (async () => {})}
+              onRegisterBatch={onRegisterTerminalBatch || (async () => {})}
+              onGoToTerminalsTab={onGoToTerminalsTab}
+            />
+
+            <div className="pt-2 flex justify-end border-t border-slate-100">
+              <button
+                onClick={() => setShowUnregisteredModal(false)}
                 className="px-4 py-2 rounded-xl text-xs bg-slate-900 hover:bg-slate-800 text-white font-bold transition shadow-xs"
               >
                 Cerrar

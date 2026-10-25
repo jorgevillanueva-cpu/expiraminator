@@ -98,7 +98,7 @@ export const TerminalManagerView: React.FC<TerminalManagerViewProps> = ({
       setShowAddModal(false);
       setStatusMessage({
         type: 'success',
-        text: 'Terminal guardada exitosamente en Firestore.',
+        text: 'Terminal guardada exitosamente en la base de datos.',
       });
       onRefresh();
     } catch (err: any) {

@@ -71,7 +71,7 @@ export async function readExcelFile(file: File): Promise<ParsedSheetData> {
 
 /**
  * Extracts time in seconds from midnight (0 .. 86399) and a formatted HH:mm:ss string
- * Handles Date objects, strings like "14:35:22", "2026-10-19 14:35:22", AM/PM, or Excel decimal time
+ * Handles Date objects, strings like "14:35:22", "2026-10-19 14:35:22", AM/PM, or Excel decimal / date serials
  */
 export function extractTimeSeconds(val: any): { seconds: number; formatted: string } | null {
   if (val === null || val === undefined || val === '') return null;
@@ -88,12 +88,14 @@ export function extractTimeSeconds(val: any): { seconds: number; formatted: stri
 
   const str = String(val).trim();
 
-  // If numeric float (Excel time fraction e.g. 0.5 = 12:00:00)
+  // If numeric float (Excel time fraction or date serial number)
   if (/^-?\d+(\.\d+)?$/.test(str)) {
     const num = parseFloat(str);
-    if (num >= 0 && num < 1) {
-      const totalSec = Math.round(num * 86400);
-      const hours = Math.floor(totalSec / 3600) % 24;
+    if (num >= 0) {
+      // Excel serial number: fraction is time of day
+      const fraction = num >= 1 ? (num - Math.floor(num)) : num;
+      const totalSec = Math.round(fraction * 86400) % 86400;
+      const hours = Math.floor(totalSec / 3600);
       const minutes = Math.floor((totalSec % 3600) / 60);
       const seconds = totalSec % 60;
       return {
@@ -116,8 +118,8 @@ export function extractTimeSeconds(val: any): { seconds: number; formatted: stri
       if (meridiem.startsWith('a') && hours === 12) hours = 0;
     }
 
-    const totalSec = hours * 3600 + minutes * 60 + seconds;
-    const formatted = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    const totalSec = (hours % 24) * 3600 + minutes * 60 + seconds;
+    const formatted = `${String(hours % 24).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
     return { seconds: totalSec, formatted };
   }
 
@@ -130,39 +132,137 @@ export function extractTimeSeconds(val: any): { seconds: number; formatted: stri
 export function extractCardLast4(val: any): string {
   if (val === null || val === undefined) return '';
   const str = String(val).replace(/\D/g, '');
-  return str.length >= 4 ? str.slice(-4) : str;
+  if (str.length >= 4) return str.slice(-4);
+  if (str.length > 0) return str.padStart(4, '0');
+  return '';
 }
 
 /**
- * Normalizes authorization code (removes leading/trailing spaces, leading zeroes if alphanumeric)
+ * Compares two card numbers by their last 4 digits
+ */
+export function cardsMatch(a: any, b: any): boolean {
+  const cA = extractCardLast4(a);
+  const cB = extractCardLast4(b);
+  if (!cA || !cB) return false;
+  return cA === cB;
+}
+
+/**
+ * Normalizes authorization code (removes leading/trailing spaces, trailing .0 from float conversions)
  */
 export function normalizeAuthCode(val: any): string {
   if (val === null || val === undefined) return '';
-  return String(val).trim().toUpperCase();
+  let str = String(val).trim().toUpperCase();
+  // Strip trailing .0 if Excel parsed integer as float (e.g. "45921.0")
+  str = str.replace(/\.0+$/, '');
+  return str;
 }
 
 /**
- * Checks if status in col I and col L are identical and both denote "Aprobada"
+ * Gets a stripped authorization code for resilient index lookup (removes leading zeros and .0)
+ */
+export function getStrippedAuthCode(val: any): string {
+  const norm = normalizeAuthCode(val);
+  const stripped = norm.replace(/^0+/, '');
+  return stripped || norm;
+}
+
+/**
+ * Checks whether two authorization codes match, accounting for leading zeros stripped by Excel,
+ * floating point '.0' endings, or whitespace.
+ */
+export function authCodesMatch(a: any, b: any): boolean {
+  if (a === null || a === undefined || b === null || b === undefined) return false;
+  const sA = normalizeAuthCode(a);
+  const sB = normalizeAuthCode(b);
+  if (!sA || !sB) return false;
+  if (sA === sB) return true;
+  // Check without leading zeroes (e.g. '045921' vs '45921')
+  const strippedA = sA.replace(/^0+/, '');
+  const strippedB = sB.replace(/^0+/, '');
+  if (strippedA && strippedA === strippedB) return true;
+  return false;
+}
+
+/**
+ * Checks whether two store IDs match, accounting for leading zeros or case
+ */
+export function storeIdsMatch(a?: string, b?: string): boolean {
+  if (!a || !b) return true; // If one is unspecified, do not block
+  const sA = String(a).trim().toUpperCase();
+  const sB = String(b).trim().toUpperCase();
+  if (sA === sB) return true;
+  const strippedA = sA.replace(/^0+/, '');
+  const strippedB = sB.replace(/^0+/, '');
+  if (strippedA && strippedA === strippedB) return true;
+  return false;
+}
+
+/**
+ * Checks if status denotes an approved transaction.
+ * Supports various Spanish and English terms: Aprobada, Aprobado, Liquidada, Exitosa, Capturada, Approved, OK.
+ * Rejects if explicitly marked as Rechazada, Cancelada, Declinada, Fallida.
  */
 export function isStatusApproved(statusI: any, statusL: any): boolean {
-  if (!statusI && !statusL) return false;
-  const sI = String(statusI || '').trim().toLowerCase();
-  const sL = String(statusL || '').trim().toLowerCase();
-
-  // Normalize accents and plural/singular
-  const normalize = (s: string) =>
-    s
+  const isApprovedStr = (val: any): boolean => {
+    if (val === null || val === undefined) return false;
+    const s = String(val)
       .normalize('NFD')
       .replace(/[\u0300-\u036f]/g, '')
-      .replace(/s$/, ''); // aprobadas -> aprobada
+      .trim()
+      .toLowerCase();
+    if (!s) return false;
+    return (
+      s.includes('aprob') ||
+      s.includes('exit') ||
+      s.includes('liquid') ||
+      s.includes('pagad') ||
+      s.includes('captur') ||
+      s.includes('complet') ||
+      s.includes('ok') ||
+      s.includes('appr') ||
+      s === '0' ||
+      s === '00' ||
+      s === 'true' ||
+      s === '1'
+    );
+  };
 
-  const nI = normalize(sI);
-  const nL = normalize(sL);
+  const isRejectedStr = (val: any): boolean => {
+    if (val === null || val === undefined) return false;
+    const s = String(val)
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .trim()
+      .toLowerCase();
+    if (!s) return false;
+    return (
+      s.includes('rechaz') ||
+      s.includes('declin') ||
+      s.includes('cancel') ||
+      s.includes('fall') ||
+      s.includes('error') ||
+      s.includes('denied')
+    );
+  };
 
-  if (nI !== nL) return false;
+  // If either explicitly indicates rejected/declined, it's not approved
+  if (isRejectedStr(statusI) || isRejectedStr(statusL)) return false;
 
-  const validApprovals = ['aprobada', 'aprobado', 'approved', 'ok', 'exitosa', 'exitoso'];
-  return validApprovals.includes(nI);
+  // If both denote approval: approved!
+  if (isApprovedStr(statusI) && isApprovedStr(statusL)) return true;
+
+  // If one is approved and the other is empty or unspecified: approved!
+  if (isApprovedStr(statusI) && (!statusL || String(statusL).trim() === '')) return true;
+  if (isApprovedStr(statusL) && (!statusI || String(statusI).trim() === '')) return true;
+
+  // If at least one denotes approval: approved!
+  if (isApprovedStr(statusI) || isApprovedStr(statusL)) return true;
+
+  // If neither column is populated, default to true so transactions are not dropped
+  if (!statusI && !statusL) return true;
+
+  return false;
 }
 
 /**

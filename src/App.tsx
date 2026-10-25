@@ -6,7 +6,6 @@ import {
   Zap,
   Trash2,
   Eye,
-  Play,
 } from 'lucide-react';
 import { Header } from './components/Header';
 import { FileUploaderCard } from './components/FileUploaderCard';
@@ -21,18 +20,22 @@ import {
   PossibleExpiredChargeResult,
   ReconciliationSummary,
   ReconciliationProgressState,
+  UnregisteredTerminalInfo,
 } from './types';
 import {
   getStoredTerminals,
   batchSaveTerminals,
+  saveSingleTerminal,
   SAMPLE_TERMINALS,
 } from './services/terminalService';
+import { UnregisteredTerminalsAlert } from './components/UnregisteredTerminalsAlert';
 import { testConnection } from './firebase';
 import {
   parseTransactionsFile,
   parseGeneratedOrdersFile,
   parseExpiredOrdersFile,
   performReconciliation,
+  countCashRowsInTransactionsFile,
   DEFAULT_OPTIONS,
   ReconciliationOptions,
 } from './utils/reconciler';
@@ -66,8 +69,10 @@ export default function App() {
   const [unmatchedApproved, setUnmatchedApproved] = useState<TransactionRecord[] | null>(null);
   const [possibleExpiredCharges, setPossibleExpiredCharges] = useState<PossibleExpiredChargeResult[] | null>(null);
   const [activeStoreIdsMap, setActiveStoreIdsMap] = useState<Map<string, string> | null>(null);
+  const [unregisteredTerminals, setUnregisteredTerminals] = useState<UnregisteredTerminalInfo[]>([]);
   const [summary, setSummary] = useState<ReconciliationSummary | null>(null);
   const [progressState, setProgressState] = useState<ReconciliationProgressState | null>(null);
+  const [isCalculating, setIsCalculating] = useState(false);
 
   // Anchor to auto-scroll directly to match screen
   const resultsSectionRef = useRef<HTMLDivElement>(null);
@@ -111,67 +116,105 @@ export default function App() {
     loadTerminalsFromFirebase();
   }, []);
 
-  const [hasReconciled, setHasReconciled] = useState(false);
-  const [isReconciling, setIsReconciling] = useState(false);
+  // Registration handlers for missing terminals directly to Firebase Firestore
+  const handleRegisterSingleTerminal = async (serialNumber: string, storeId: string) => {
+    const saved = await saveSingleTerminal({ serialNumber, storeId, notes: 'Registrada desde alerta de cotejo' });
+    setTerminals((prev) => {
+      const cleanSerial = serialNumber.trim().toUpperCase();
+      const filtered = prev.filter((t) => t.serialNumber.trim().toUpperCase() !== cleanSerial);
+      return [...filtered, saved];
+    });
+  };
 
-  // Manual reconciliation handler (triggered explicitly by the button)
-  const handleStartReconciliation = () => {
+  const handleRegisterBatchTerminals = async (items: Array<{ serialNumber: string; storeId: string }>) => {
+    const saved = await batchSaveTerminals(
+      items.map((it) => ({
+        serialNumber: it.serialNumber,
+        storeId: it.storeId,
+        notes: 'Registro masivo desde alerta de cotejo',
+      }))
+    );
+    setTerminals((prev) => {
+      const savedMap = new Map(saved.map((s) => [s.serialNumber.trim().toUpperCase(), s]));
+      const remaining = prev.filter((p) => !savedMap.has(p.serialNumber.trim().toUpperCase()));
+      return [...remaining, ...saved];
+    });
+  };
+
+  // HIGH-SPEED NON-BLOCKING RECONCILIATION ENGINE
+  useEffect(() => {
     if (!file1Rows || !file2Rows) {
-      setErrorMessage('Debes cargar al menos el Archivo 1 (SPIN) y el Archivo 2 (Órdenes Yoshi) para iniciar el cotejamiento.');
+      if (!file1Rows && !file2Rows && !file3Rows) {
+        setMatchedWithOrders(null);
+        setUnmatchedApproved(null);
+        setPossibleExpiredCharges(null);
+        setActiveStoreIdsMap(null);
+        setUnregisteredTerminals([]);
+        setSummary(null);
+        setProgressState(null);
+      }
       return;
     }
 
+    setIsCalculating(true);
     setErrorMessage(null);
-    setIsReconciling(true);
 
-    try {
-      const transactions = parseTransactionsFile(file1Rows);
-      const generatedOrders = parseGeneratedOrdersFile(file2Rows);
-      const expiredOrders = file3Rows ? parseExpiredOrdersFile(file3Rows) : [];
+    // Asynchronously yield to browser event loop so UI does not freeze or stutter
+    const calculationTimer = setTimeout(() => {
+      try {
+        const cashRowsA1 = file1Rows ? countCashRowsInTransactionsFile(file1Rows) : 0;
+        const transactions = parseTransactionsFile(file1Rows);
+        const generatedOrders = parseGeneratedOrdersFile(file2Rows);
+        const expiredOrders = file3Rows ? parseExpiredOrdersFile(file3Rows) : [];
 
-      if (transactions.length === 0 || generatedOrders.length === 0) {
-        setErrorMessage('Los archivos cargados no contienen filas de transacciones u órdenes válidas.');
-        setIsReconciling(false);
-        return;
+        if (transactions.length === 0 || generatedOrders.length === 0) {
+          setIsCalculating(false);
+          return;
+        }
+
+        const effectiveTerminals =
+          terminals.length > 0 ? terminals : SAMPLE_TERMINALS.map((t, i) => ({ id: `t_${i}`, ...t }));
+
+        const results = performReconciliation(
+          transactions,
+          generatedOrders,
+          expiredOrders,
+          effectiveTerminals,
+          options,
+          cashRowsA1
+        );
+
+        setMatchedWithOrders(results.matchedWithOrders);
+        setUnmatchedApproved(results.unmatchedApprovedTransactions);
+        setPossibleExpiredCharges(results.possibleExpiredCharges);
+        setActiveStoreIdsMap(results.activeStoreIdsMap);
+        setUnregisteredTerminals(results.unregisteredTerminals);
+        setSummary(results.summary);
+        setProgressState({
+          isStreaming: false,
+          phase: 'completed',
+          phaseDescription: `Cotejo concluido: ${results.matchedWithOrders.length} coincidentes en pantalla, ${results.unmatchedApprovedTransactions.length} aprobadas restantes.`,
+          progressPercent: 100,
+          totalTransactionsToProcess: results.summary.file1FilteredByStoreIdRows,
+          currentProcessedIndex: results.summary.file1FilteredByStoreIdRows,
+          matchedCountLive: results.matchedWithOrders.length,
+          expiredMatchesCountLive: results.possibleExpiredCharges.length,
+        });
+
+        // Smoothly scroll down to matches screen
+        setTimeout(() => {
+          resultsSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }, 100);
+      } catch (err: any) {
+        console.warn('Reconciliation error:', err);
+        setErrorMessage(err.message || 'Error al procesar los archivos');
+      } finally {
+        setIsCalculating(false);
       }
+    }, 15);
 
-      const results = performReconciliation(
-        transactions,
-        generatedOrders,
-        expiredOrders,
-        terminals.length > 0 ? terminals : SAMPLE_TERMINALS.map((t, i) => ({ id: `t_${i}`, ...t })),
-        options
-      );
-
-      setMatchedWithOrders(results.matchedWithOrders);
-      setUnmatchedApproved(results.unmatchedApprovedTransactions);
-      setPossibleExpiredCharges(results.possibleExpiredCharges);
-      setActiveStoreIdsMap(results.activeStoreIdsMap);
-      setSummary(results.summary);
-      setProgressState({
-        isStreaming: false,
-        phase: 'completed',
-        phaseDescription: `Cotejo concluido: ${results.matchedWithOrders.length} coincidentes en pantalla, ${results.unmatchedApprovedTransactions.length} aprobadas restantes.`,
-        progressPercent: 100,
-        totalTransactionsToProcess: results.summary.file1FilteredByStoreIdRows,
-        currentProcessedIndex: results.summary.file1FilteredByStoreIdRows,
-        matchedCountLive: results.matchedWithOrders.length,
-        expiredMatchesCountLive: results.possibleExpiredCharges.length,
-      });
-
-      setHasReconciled(true);
-
-      // Smoothly scroll down to matches screen
-      setTimeout(() => {
-        resultsSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      }, 100);
-    } catch (err: any) {
-      console.warn('Reconciliation error:', err);
-      setErrorMessage(err.message || 'Error al procesar los archivos');
-    } finally {
-      setIsReconciling(false);
-    }
-  };
+    return () => clearTimeout(calculationTimer);
+  }, [file1Rows, file2Rows, file3Rows, terminals, options]);
 
   const handleReset = () => {
     setFile1Name(null);
@@ -184,32 +227,21 @@ export default function App() {
     setUnmatchedApproved(null);
     setPossibleExpiredCharges(null);
     setActiveStoreIdsMap(null);
+    setUnregisteredTerminals([]);
     setSummary(null);
     setProgressState(null);
     setErrorMessage(null);
-    setHasReconciled(false);
-    setIsReconciling(false);
   };
 
-  const handleFileChange = () => {
-    setHasReconciled(false);
-    setMatchedWithOrders(null);
-    setUnmatchedApproved(null);
-    setPossibleExpiredCharges(null);
-    setActiveStoreIdsMap(null);
-    setSummary(null);
-    setProgressState(null);
-  };
-
-  // Live match preview counts for header & pill
+  // Live match preview counts for real-time header & pill
   const realtimeStatus = useMemo(() => {
-    const isLive = Boolean(hasReconciled && file1Rows && file2Rows);
+    const isLive = Boolean(file1Rows && file2Rows);
     return {
       isLive,
       matchedCount: matchedWithOrders?.length || 0,
       expiredWithChargeCount: possibleExpiredCharges?.length || 0,
     };
-  }, [hasReconciled, file1Rows, file2Rows, matchedWithOrders, possibleExpiredCharges]);
+  }, [file1Rows, file2Rows, matchedWithOrders, possibleExpiredCharges]);
 
   const scrollToResults = () => {
     resultsSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -299,7 +331,7 @@ export default function App() {
                       1. Cruce con Terminales
                     </span>
                     <p className="text-slate-600">
-                      Toma Col S (Archivo 2), busca en el Catálogo de Terminales (Col C) y obtiene ID Store (Col D)
+                      Toma Col S (Archivo 2), busca en Base de Terminales (Col C) y obtiene ID Store (Col D)
                       para filtrar Archivo 1 (Col P).
                     </p>
                   </div>
@@ -309,7 +341,7 @@ export default function App() {
                       2. Cotejo A1 vs A2 (Pantalla)
                     </span>
                     <p className="text-slate-600">
-                      Tarjeta (S vs M), Autorización (Y vs R) y Hora (D vs A con margen de 1-3 min). Ambas
+                      Tarjeta (S vs M), Autorización (Z vs R) y Hora (D vs A con margen de 1-3 min). Ambas
                       aprobadas en Cols I y L. Se muestra en pantalla en tiempo real.
                     </p>
                   </div>
@@ -374,26 +406,25 @@ export default function App() {
               <FileUploaderCard
                 fileNumber={1}
                 title="Archivo 1: SPIN (Total de Registro de Transacciones)"
-                subtitle="Transacciones bancarias SPIN exitosas o rechazadas"
+                subtitle="Transacciones bancarias SPIN (excluye ventas en efectivo)"
+                discardRuleText="Descarta filas 1 al 12 y descarta renglones en efectivo (con ' - ')"
                 columnsSummary={[
                   { col: 'D', name: 'Hora de transacción' },
                   { col: 'E', name: 'Monto de transacción (Cobrado)' },
                   { col: 'I & L', name: 'Estatus (ambas Aprobadas)' },
                   { col: 'P', name: 'Store ID' },
                   { col: 'S', name: 'Terminación tarjeta' },
-                  { col: 'Y', name: 'Código autorización' },
+                  { col: 'Z', name: 'Código autorización' },
                 ]}
                 fileName={file1Name}
                 rowCount={file1Rows ? Math.max(0, file1Rows.length - 12) : 0}
                 onFileLoaded={(name, rows) => {
                   setFile1Name(name);
                   setFile1Rows(rows);
-                  handleFileChange();
                 }}
                 onClear={() => {
                   setFile1Name(null);
                   setFile1Rows(null);
-                  handleFileChange();
                 }}
               />
 
@@ -402,9 +433,10 @@ export default function App() {
                 fileNumber={2}
                 title="Archivo 2: Órdenes Yoshi (Total de Órdenes Generadas)"
                 subtitle="Órdenes de venta del sistema POS Yoshi"
+                discardRuleText="Datos a partir del renglón 5 (descarta renglones 1 al 4)"
                 columnsSummary={[
                   { col: 'A', name: 'Fecha de venta (solo hora)' },
-                  { col: 'H', name: 'Monto Total orden generada' },
+                  { col: 'K', name: 'Monto Total orden generada' },
                   { col: 'M', name: 'Tarjeta (últimos 4 dígitos)' },
                   { col: 'R', name: 'Código de autorización' },
                   { col: 'S', name: 'Número de terminal' },
@@ -414,12 +446,10 @@ export default function App() {
                 onFileLoaded={(name, rows) => {
                   setFile2Name(name);
                   setFile2Rows(rows);
-                  handleFileChange();
                 }}
                 onClear={() => {
                   setFile2Name(null);
                   setFile2Rows(null);
-                  handleFileChange();
                 }}
               />
 
@@ -428,73 +458,25 @@ export default function App() {
                 fileNumber={3}
                 title="Archivo 3: Expiradas (Total de Órdenes Expiradas)"
                 subtitle="Órdenes expiradas sin completar"
+                discardRuleText="Datos a partir del renglón 5 (descarta renglones 1 al 4)"
                 columnsSummary={[
                   { col: 'A', name: 'Hora (solo hora)' },
                   { col: 'B', name: 'Concesión' },
                   { col: 'C', name: 'Código de orden' },
                   { col: 'E', name: 'Vendedor asignado' },
-                  { col: 'H', name: 'Monto Base / Total (+5%..+20%)' },
+                  { col: 'H', name: 'Monto Total / Base (+5%..+20% por posible propina)' },
                 ]}
                 fileName={file3Name}
                 rowCount={file3Rows ? Math.max(0, file3Rows.length - 4) : 0}
                 onFileLoaded={(name, rows) => {
                   setFile3Name(name);
                   setFile3Rows(rows);
-                  handleFileChange();
                 }}
                 onClear={() => {
                   setFile3Name(null);
                   setFile3Rows(null);
-                  handleFileChange();
                 }}
               />
-            </div>
-
-            {/* BOTÓN PARA COMENZAR CON EL COTEJAMIENTO (MANUAL) */}
-            <div className="p-5 rounded-3xl bg-white border-2 border-rose-200 shadow-xs flex flex-col sm:flex-row items-center justify-between gap-4">
-              <div className="flex items-center gap-3.5">
-                <div className={`w-12 h-12 rounded-2xl flex items-center justify-center shrink-0 border transition ${
-                  file1Rows && file2Rows
-                    ? 'bg-rose-50 border-rose-200 text-rose-600'
-                    : 'bg-slate-100 border-slate-200 text-slate-400'
-                }`}>
-                  <Zap className={`w-6 h-6 ${file1Rows && file2Rows ? 'animate-pulse text-rose-600' : 'text-slate-400'}`} />
-                </div>
-                <div>
-                  <h3 className="font-black text-slate-900 text-base">
-                    {hasReconciled ? 'Cotejamiento Finalizado' : 'Iniciar Cotejamiento de Archivos'}
-                  </h3>
-                  <p className="text-xs text-slate-500 font-medium">
-                    {!file1Rows || !file2Rows
-                      ? 'Carga Archivo 1 (SPIN) y Archivo 2 (Órdenes Yoshi) para habilitar el cotejo.'
-                      : hasReconciled
-                      ? 'Coincidencias calculadas y visibles en el recuadro inferior. Presiona nuevamente para recalcular.'
-                      : 'Archivos listos para cotejar. Haz clic en "Comenzar Cotejamiento" para procesar.'}
-                  </p>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-3 w-full sm:w-auto justify-end">
-                <button
-                  type="button"
-                  onClick={handleStartReconciliation}
-                  disabled={!file1Rows || !file2Rows || isReconciling}
-                  className={`w-full sm:w-auto inline-flex items-center justify-center gap-2 px-8 py-3.5 rounded-2xl font-black text-sm transition-all shadow-sm ${
-                    !file1Rows || !file2Rows
-                      ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed'
-                      : 'bg-rose-600 hover:bg-rose-700 text-white border border-rose-700 hover:shadow-md active:scale-98 cursor-pointer'
-                  }`}
-                >
-                  <Play className={`w-4 h-4 fill-current ${isReconciling ? 'animate-spin' : ''}`} />
-                  <span>
-                    {isReconciling
-                      ? 'Procesando...'
-                      : hasReconciled
-                      ? 'Volver a Cotejar'
-                      : 'Comenzar Cotejamiento'}
-                  </span>
-                </button>
-              </div>
             </div>
 
             {/* Database of Terminals Status & Options bar */}
@@ -506,7 +488,7 @@ export default function App() {
                 <div>
                   <div className="flex items-center gap-2">
                     <h4 className="text-xs font-bold text-slate-800 uppercase font-mono tracking-wider">
-                      Base de Terminales Registradas:
+                      Base de Datos de Terminales:
                     </h4>
                     <span className="px-2 py-0.5 rounded-md bg-indigo-50 text-indigo-700 font-mono text-xs font-bold border border-indigo-200">
                       {terminals.length} activas
@@ -531,6 +513,19 @@ export default function App() {
               </div>
             </div>
 
+            {/* Calculation in Progress Indicator */}
+            {isCalculating && (
+              <div className="p-4 rounded-2xl bg-indigo-50 border border-indigo-200 text-indigo-900 text-xs flex items-center justify-between gap-3 font-medium animate-pulse">
+                <div className="flex items-center gap-3">
+                  <div className="w-5 h-5 border-2 border-indigo-600 border-t-transparent rounded-full animate-spin shrink-0" />
+                  <span>Procesando cotejo a alta velocidad con indexación hash...</span>
+                </div>
+                <span className="text-[11px] font-mono text-indigo-700 font-bold bg-white px-2.5 py-1 rounded-lg border border-indigo-200">
+                  Modo Ágil Activo
+                </span>
+              </div>
+            )}
+
             {/* Error Banner */}
             {errorMessage && (
               <div className="p-4 rounded-2xl bg-red-50 border border-red-200 text-red-700 text-xs flex items-center gap-3 font-medium">
@@ -539,8 +534,8 @@ export default function App() {
               </div>
             )}
 
-            {/* PANTALLA DE COINCIDENCIAS Y RESULTADOS (SÓLO CUANDO EL USUARIO INICIA COTEJAMIENTO) */}
-            {hasReconciled && matchedWithOrders && (
+            {/* PANTALLA DE COINCIDENCIAS Y RESULTADOS */}
+            {((file1Rows && file2Rows) || summary || (matchedWithOrders && matchedWithOrders.length > 0)) && (
               <div ref={resultsSectionRef} className="scroll-mt-20">
                 <ResultsDisplay
                   summary={
@@ -558,6 +553,8 @@ export default function App() {
                       matchedWithOrdersCount: matchedWithOrders?.length || 0,
                       unmatchedApprovedCount: unmatchedApproved?.length || 0,
                       possibleExpiredWithChargeCount: possibleExpiredCharges?.length || 0,
+                      unregisteredTerminalsCount: unregisteredTerminals.length,
+                      unregisteredTerminalsList: unregisteredTerminals,
                       timestamp: new Date().toISOString(),
                     }
                   }
@@ -565,6 +562,10 @@ export default function App() {
                   unmatchedApproved={unmatchedApproved || []}
                   possibleExpiredCharges={possibleExpiredCharges || []}
                   activeStoreIdsMap={activeStoreIdsMap || new Map()}
+                  unregisteredTerminals={unregisteredTerminals}
+                  onRegisterTerminalSingle={handleRegisterSingleTerminal}
+                  onRegisterTerminalBatch={handleRegisterBatchTerminals}
+                  onGoToTerminalsTab={() => setActiveTab('terminals')}
                   onReset={handleReset}
                   isRealTimeActive={true}
                   progressState={progressState || undefined}
@@ -671,7 +672,7 @@ export default function App() {
                   className="w-24 bg-white border border-slate-200 rounded-xl px-3 py-1.5 text-slate-900 font-mono shadow-2xs font-bold"
                 />
                 <span className="text-slate-500 ml-2 font-medium">
-                  Tolerancia de centavos para evaluar posibles propinas (+5%, +10%, +15%, +20%) o Total exacto
+                  Tolerancia de centavos para evaluar +5%, +10%, +15%, +20% o Total
                 </span>
               </div>
             </div>
@@ -708,7 +709,7 @@ export default function App() {
             className="w-10 h-12 object-contain shrink-0"
           />
           <p className="font-extrabold text-slate-800 text-sm tracking-tight font-mono">
-            EXPIRAMINATOR - Doofenshmirtz Malvados y Asociados
+            Expiraminator -Doofenshmirtz Malvados y Asociados Yoshis
           </p>
         </div>
       </footer>

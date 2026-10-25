@@ -10,7 +10,7 @@ export interface TransactionRecord {
   rowNumber: number;
   raw: any[];
   cardEnding: string;       // Columna S (index 18)
-  authCode: string;         // Columna Y (index 24)
+  authCode: string;         // Columna Z (index 25)
   statusI: string;          // Columna I (index 8)
   statusL: string;          // Columna L (index 11)
   isApproved: boolean;      // Estatus I y L iguales y aprobadas
@@ -18,6 +18,7 @@ export interface TransactionRecord {
   timeSeconds: number;      // Seconds from midnight
   storeId: string;          // Columna P (index 15)
   amount: number;           // Monto de la transacción
+  terminalSerial?: string;  // No. Serie de la terminal
 }
 
 export interface GeneratedOrderRecord {
@@ -29,7 +30,7 @@ export interface GeneratedOrderRecord {
   timeStr: string;
   timeSeconds: number;
   terminalSerial: string;   // Columna S (index 18)
-  totalAmount: number;      // Columna H (index 7) - monto total órdenes Yoshi
+  totalAmount: number;      // Columna K (index 10) - monto total órdenes Yoshi
 }
 
 export interface ExpiredOrderRecord {
@@ -67,7 +68,7 @@ export interface PossibleExpiredChargeResult {
   horaArchivo1: string;
   horaArchivo3: string;
   montoArchivo1: number;       // Archivo 1 SPIN Col E: Monto Cobrado
-  montoArchivo2Total: number;  // Archivo 2 Órdenes Yoshi Col H: Monto Total
+  montoArchivo2Total: number;  // Archivo 2 Órdenes Yoshi Col K: Monto Total
   montoArchivo3Total: number;  // Archivo 3 Expiradas Col H: Monto Base / Total
   montoArchivo3Base: number;   // Archivo 3 Expiradas Col G (si existe)
   storeIdArchivo1: string;
@@ -78,7 +79,14 @@ export interface PossibleExpiredChargeResult {
   codigoAutorizacionArchivo1: string;
   estatusIArchivo1: string;
   estatusLArchivo1: string;
+  terminalSerialArchivo2?: string;
   isLatestMatch?: boolean;
+}
+
+export interface UnregisteredTerminalInfo {
+  serialNumber: string;
+  orderCount: number;
+  sampleRowNumber: number;
 }
 
 export interface ReconciliationSummary {
@@ -95,6 +103,9 @@ export interface ReconciliationSummary {
   matchedWithOrdersCount: number;
   unmatchedApprovedCount: number;
   possibleExpiredWithChargeCount: number;
+  unregisteredTerminalsCount: number;
+  unregisteredTerminalsList: UnregisteredTerminalInfo[];
+  file1CashRowsExcluded?: number;
   timestamp: string;
 }
 

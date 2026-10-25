@@ -60,7 +60,7 @@ export const SampleFilesDownloader: React.FC<SampleFilesDownloaderProps> = ({
           <div>
             <div className="flex items-center justify-between mb-2">
               <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-indigo-50 text-indigo-700 border border-indigo-200">
-                BASE FIREBASE
+                CATÁLOGO TERMINALES
               </span>
               <span className="text-xs text-slate-400 font-mono font-medium">.xlsx</span>
             </div>
@@ -118,7 +118,7 @@ export const SampleFilesDownloader: React.FC<SampleFilesDownloaderProps> = ({
             </div>
             <h3 className="text-sm font-bold text-slate-900">Total Órdenes Generadas (Excel detallado pagos)</h3>
             <p className="text-xs text-slate-600 mt-1">
-              Desde renglón 5. Col A (Fecha de venta / hora), Col M (Tarjeta últimos 4), Col R
+              Desde renglón 5. Col A (Fecha de venta / hora), Col K (Monto Total), Col M (Tarjeta últimos 4), Col R
               (Autorización), Col S (Número de terminal).
             </p>
           </div>
