@@ -31,6 +31,8 @@ export interface GeneratedOrderRecord {
   timeSeconds: number;
   terminalSerial: string;   // Columna S (index 18)
   totalAmount: number;      // Columna K (index 10) - monto total órdenes Yoshi
+  concession?: string;      // Columna D (index 3) - Concesión / Área
+  seller?: string;          // Columna F (index 5) - Vendedor / Usuario
 }
 
 export interface ExpiredOrderRecord {
@@ -43,6 +45,9 @@ export interface ExpiredOrderRecord {
   seller: string;           // Columna E (index 4)
   baseAmount: number;       // Columna G (index 6) - monto base anterior
   totalAmount: number;      // Columna H (index 7) - monto base / total Col H
+  terminalSerial?: string;  // Asignada desde Archivo 2 Col S al coincidir Col B vs Col D y Col E vs Col F
+  storeId?: string;         // Store ID mapeado desde catálogo de terminales
+  terminalMatchedFromOrder?: boolean;
 }
 
 export interface MatchedOrderResult {
@@ -80,6 +85,9 @@ export interface PossibleExpiredChargeResult {
   estatusIArchivo1: string;
   estatusLArchivo1: string;
   terminalSerialArchivo2?: string;
+  terminalSerialArchivo3?: string;
+  storeIdArchivo3?: string;
+  terminalMatchConfirmed?: boolean;
   isLatestMatch?: boolean;
 }
 
@@ -131,6 +139,45 @@ export interface ReconciliationProgressState {
   };
 }
 
+export interface ReconciliationValidationConfig {
+  // 1. Store ID & Terminal
+  filterByStoreId: boolean; // Cotejar/Filtrar Archivo 1 por Store IDs de terminales activas
+  matchStoreIdA1A2: boolean; // Cotejar Store ID entre Archivo 1 y Archivo 2 en Paso 1
+  matchTerminalOrStoreA1A3: boolean; // Cotejar Terminal Física o Store ID entre Aprobadas y Expiradas (Paso 3)
+  requireTerminalForExpired: boolean; // Exigir Terminal asignada en Expiradas (ignorar órdenes que fueron solo en efectivo)
+
+  // 2. Archivo 2 (Órdenes Yoshi)
+  excludeCashAndEmptyTerminal: boolean; // Excluir ventas en Efectivo o con Columna S vacía en Archivo 2
+  assignTerminalFromA2ToA3: boolean; // Cruce previo Concesión (B vs D) y Vendedor (E vs F) para asignar Terminal
+
+  // 3. Transacciones Bancarias (Paso 1: A1 vs A2)
+  matchCardEnding: boolean; // Cotejar terminación de tarjeta (últimos 4 dígitos)
+  matchAuthCode: boolean; // Cotejar código de autorización bancaria
+  matchTimeWindowA1A2: boolean; // Cotejar ventana de tiempo (1 a 3 minutos) en Paso 1
+  matchAmountA1A2: boolean; // Cotejar coincidencia de monto en Paso 1 (A1 Col E vs A2 Col K)
+
+  // 4. Órdenes Expiradas (Paso 3: Aprobadas Restantes vs A3)
+  matchTimeWindowA1A3: boolean; // Cotejar ventana de tiempo (+1 a 3 minutos) en Órdenes Expiradas
+  matchAmountA1A3: boolean; // Cotejar coincidencia de monto
+  enableTipIncrements: boolean; // Evaluar incrementos del 5 al 20% por propina
+}
+
+export const DEFAULT_VALIDATION_CONFIG: ReconciliationValidationConfig = {
+  filterByStoreId: true,
+  matchStoreIdA1A2: true,
+  matchTerminalOrStoreA1A3: true,
+  requireTerminalForExpired: true,
+  excludeCashAndEmptyTerminal: true,
+  assignTerminalFromA2ToA3: true,
+  matchCardEnding: true,
+  matchAuthCode: true,
+  matchTimeWindowA1A2: true,
+  matchAmountA1A2: true,
+  matchTimeWindowA1A3: true,
+  matchAmountA1A3: true,
+  enableTipIncrements: true,
+};
+
 export interface FileDataState {
   file1Name: string | null;
   file2Name: string | null;
@@ -139,3 +186,4 @@ export interface FileDataState {
   file2Data: any[][] | null;
   file3Data: any[][] | null;
 }
+

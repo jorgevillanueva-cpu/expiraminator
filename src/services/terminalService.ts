@@ -56,11 +56,70 @@ export async function saveSingleTerminal(
   }
 }
 
+export async function updateTerminal(
+  id: string,
+  updates: { serialNumber: string; storeId: string; notes?: string }
+): Promise<TerminalRecord> {
+  const cleanSerial = updates.serialNumber.trim();
+  const cleanStore = updates.storeId.trim();
+  const docData = {
+    serialNumber: cleanSerial,
+    storeId: cleanStore,
+    updatedAt: new Date().toISOString(),
+    notes: updates.notes || '',
+  };
+
+  try {
+    await setDoc(doc(db, COLLECTION_NAME, id), docData, { merge: true });
+    return {
+      id,
+      ...docData,
+    };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, `${COLLECTION_NAME}/${id}`);
+  }
+}
+
 export async function deleteTerminalById(id: string): Promise<void> {
   try {
     await deleteDoc(doc(db, COLLECTION_NAME, id));
   } catch (error) {
     handleFirestoreError(error, OperationType.DELETE, `${COLLECTION_NAME}/${id}`);
+  }
+}
+
+export async function deleteMultipleTerminals(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  try {
+    for (let i = 0; i < ids.length; i += 400) {
+      const chunk = ids.slice(i, i + 400);
+      const batch = writeBatch(db);
+      for (const id of chunk) {
+        batch.delete(doc(db, COLLECTION_NAME, id));
+      }
+      await batch.commit();
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, COLLECTION_NAME);
+  }
+}
+
+export async function deleteAllTerminals(): Promise<number> {
+  try {
+    const snapshot = await getDocs(collection(db, COLLECTION_NAME));
+    const ids = snapshot.docs.map((d) => d.id);
+    if (ids.length === 0) return 0;
+    for (let i = 0; i < ids.length; i += 400) {
+      const chunk = ids.slice(i, i + 400);
+      const batch = writeBatch(db);
+      for (const id of chunk) {
+        batch.delete(doc(db, COLLECTION_NAME, id));
+      }
+      await batch.commit();
+    }
+    return ids.length;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, COLLECTION_NAME);
   }
 }
 

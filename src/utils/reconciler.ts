@@ -9,6 +9,8 @@ import {
   ReconciliationSummary,
   ReconciliationProgressState,
   UnregisteredTerminalInfo,
+  ReconciliationValidationConfig,
+  DEFAULT_VALIDATION_CONFIG,
 } from '../types';
 import {
   extractAmount,
@@ -22,16 +24,136 @@ import {
 } from './excelParser';
 
 export interface ReconciliationOptions {
-  minTimeDiffSeconds: number; // default: 60 (1 min) or 0
+  minTimeDiffSeconds: number; // default: 0
   maxTimeDiffSeconds: number; // default: 180 (3 min)
-  amountTolerance: number;    // default: 1.0 (difference in currency units allowed)
+  amountTolerance: number;    // default: 0.99
+  enableTipIncrements?: boolean; // default: true (opción de utilizar o no el incremento del 5 al 20%)
+  validations?: Partial<ReconciliationValidationConfig>;
 }
 
 export const DEFAULT_OPTIONS: ReconciliationOptions = {
   minTimeDiffSeconds: 0,
   maxTimeDiffSeconds: 180, // up to 3 minutes superior margin
   amountTolerance: 0.99,
+  enableTipIncrements: true,
+  validations: DEFAULT_VALIDATION_CONFIG,
 };
+
+export function getEffectiveValidations(options?: ReconciliationOptions): ReconciliationValidationConfig {
+  const merged: ReconciliationValidationConfig = {
+    ...DEFAULT_VALIDATION_CONFIG,
+    ...(options?.validations || {}),
+  };
+  if (options?.enableTipIncrements !== undefined) {
+    merged.enableTipIncrements = options.enableTipIncrements;
+  }
+  return merged;
+}
+
+
+/**
+ * Normalizes text for matching concession and seller names
+ * Handles accents, uppercase, extra spaces
+ */
+export function normalizeMatchText(str?: string): string {
+  if (!str) return '';
+  return String(str)
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, ' ');
+}
+
+/**
+ * Asigna la terminal de Archivo 2 (Columna S) a cada registro de Archivo 3
+ * mediante la comparación previa de:
+ * Archivo 3 Columna B (Concesión) vs Archivo 2 Columna D (Concesión)
+ * Archivo 3 Columna E (Vendedor) vs Archivo 2 Columna F (Vendedor)
+ *
+ * Reglas estrictas:
+ * 1. Coincidencia en ambas columnas simultáneamente (Col B == Col D y Col E == Col F).
+ * 2. Si coinciden pero Archivo 2 NO TIENE VALOR EN LA COLUMNA S (vacía o nula),
+ *    NO se le asigna terminal y se descarta esa coincidencia (no asignar al azar).
+ * 3. Al tener un número de terminal real y válido en Col S, se asigna a Archivo 3 y se
+ *    obtiene su correspondiente Store ID del catálogo para localizar pagos huérfanos legítimos.
+ */
+export function matchAndAssignTerminalsToArch3(
+  expiredOrders: ExpiredOrderRecord[],
+  generatedOrders: GeneratedOrderRecord[],
+  serialToStoreMap: Map<string, string>
+): void {
+  // Mapa de Concesión + Vendedor -> Frecuencia de Terminales en Archivo 2
+  // Solo consideramos registros que tengan terminal válida y no vacía en Col S
+  const pairToTerminalCounts = new Map<string, Map<string, number>>();
+
+  for (const order of generatedOrders) {
+    const serial = String(order.terminalSerial || '').trim();
+    // Si no tiene valor en Columna S, se omite
+    if (!serial || serial === '-' || serial.toLowerCase() === 'null' || serial.toLowerCase() === 'n/a') {
+      continue;
+    }
+
+    const normConcession = normalizeMatchText(order.concession); // Archivo 2 Col D
+    const normSeller = normalizeMatchText(order.seller);         // Archivo 2 Col F
+
+    // Ambas columnas deben existir
+    if (!normConcession || !normSeller) continue;
+
+    const key = `${normConcession}___${normSeller}`;
+    let termMap = pairToTerminalCounts.get(key);
+    if (!termMap) {
+      termMap = new Map<string, number>();
+      pairToTerminalCounts.set(key, termMap);
+    }
+    termMap.set(serial, (termMap.get(serial) || 0) + 1);
+  }
+
+  // Resolver la terminal para cada par estricto Concesión + Vendedor
+  const pairToTerminal = new Map<string, string>();
+  pairToTerminalCounts.forEach((termMap, key) => {
+    let bestSerial = '';
+    let maxCount = -1;
+    termMap.forEach((cnt, ser) => {
+      if (cnt > maxCount) {
+        maxCount = cnt;
+        bestSerial = ser;
+      }
+    });
+    if (bestSerial && bestSerial.trim() !== '') {
+      pairToTerminal.set(key, bestSerial.trim());
+    }
+  });
+
+  // Asignar terminal y Store ID a cada registro de Archivo 3
+  for (const exp of expiredOrders) {
+    const normB = normalizeMatchText(exp.concession); // Archivo 3 Col B
+    const normE = normalizeMatchText(exp.seller);     // Archivo 3 Col E
+
+    // Si falta concesión o vendedor en Archivo 3, descartar coincidencia
+    if (!normB || !normE) {
+      exp.terminalSerial = undefined;
+      exp.storeId = undefined;
+      exp.terminalMatchedFromOrder = false;
+      continue;
+    }
+
+    const key = `${normB}___${normE}`;
+    const matchedSerial = pairToTerminal.get(key);
+
+    // Si coinciden en ambas columnas pero Archivo 2 no tiene valor en Columna S:
+    // NO le asignes terminal, descarta esa coincidencia (no asignar al azar)
+    if (matchedSerial && matchedSerial.trim() !== '') {
+      exp.terminalSerial = matchedSerial.trim();
+      exp.storeId = serialToStoreMap.get(matchedSerial.trim().toUpperCase()) || '';
+      exp.terminalMatchedFromOrder = true;
+    } else {
+      exp.terminalSerial = undefined;
+      exp.storeId = undefined;
+      exp.terminalMatchedFromOrder = false;
+    }
+  }
+}
 
 export function countCashRowsInTransactionsFile(rows: any[][]): number {
   return 0;
@@ -45,6 +167,7 @@ export function parseTransactionsFile(rows: any[][]): TransactionRecord[] {
   const records: TransactionRecord[] = [];
   let startIdx = 12; // default standard SPIN offset (row 13)
 
+  let terminalColIdx = -1;
   for (let r = 0; r < Math.min(rows.length, 14); r++) {
     const rowStr = (rows[r] || []).map((c) => String(c || '').toLowerCase()).join(' ');
     if (
@@ -52,6 +175,19 @@ export function parseTransactionsFile(rows: any[][]): TransactionRecord[] {
       (rowStr.includes('autoriza') || rowStr.includes('auth') || rowStr.includes('codigo'))
     ) {
       startIdx = r + 1;
+      // Also inspect this header row for terminal column
+      const row = rows[r] || [];
+      for (let c = 0; c < row.length; c++) {
+        const cell = String(row[c] || '').toLowerCase().trim();
+        if (
+          (cell.includes('terminal') || cell.includes('no. serie') || cell.includes('num serie') || cell.includes('serial') || cell.includes('device') || cell.includes('dispositivo')) &&
+          !cell.includes('tarjeta') &&
+          !cell.includes('terminacion')
+        ) {
+          terminalColIdx = c;
+          break;
+        }
+      }
       break;
     }
   }
@@ -76,6 +212,15 @@ export function parseTransactionsFile(rows: any[][]): TransactionRecord[] {
       row[25] !== undefined && String(row[25]).trim() !== ''
         ? row[25]
         : row[24];
+
+    // Número de terminal directamente de Archivo 1 si existe columna
+    let directTerminalSerial = '';
+    if (terminalColIdx !== -1 && row[terminalColIdx] !== undefined) {
+      const termRaw = String(row[terminalColIdx] || '').trim();
+      if (termRaw && termRaw !== '-' && termRaw.toLowerCase() !== 'null' && termRaw.toLowerCase() !== 'n/a') {
+        directTerminalSerial = termRaw;
+      }
+    }
 
     // Monto de la transacción en Archivo 1 (SPIN): Columna E (índice 4)
     let amount = 0;
@@ -119,6 +264,7 @@ export function parseTransactionsFile(rows: any[][]): TransactionRecord[] {
       timeSeconds: parsedTime ? parsedTime.seconds : -1,
       storeId,
       amount,
+      terminalSerial: directTerminalSerial || undefined,
     });
   }
   return records;
@@ -128,8 +274,12 @@ export function parseTransactionsFile(rows: any[][]): TransactionRecord[] {
  * Parse Archivo 2: Total de Órdenes Generadas
  * Detects header row dynamically (supports standard row 5 or row 1/2)
  */
-export function parseGeneratedOrdersFile(rows: any[][]): GeneratedOrderRecord[] {
+export function parseGeneratedOrdersFile(
+  rows: any[][],
+  validationConfig?: Partial<ReconciliationValidationConfig>
+): GeneratedOrderRecord[] {
   const records: GeneratedOrderRecord[] = [];
+  const excludeCashAndEmpty = validationConfig?.excludeCashAndEmptyTerminal !== false;
   let startIdx = 4; // default row 5 (index 4)
 
   for (let r = 0; r < Math.min(rows.length, 6); r++) {
@@ -154,15 +304,31 @@ export function parseGeneratedOrdersFile(rows: any[][]): GeneratedOrderRecord[] 
       continue;
     }
 
+    const paymentType = String(row[6] || '').trim().toLowerCase(); // Columna G (index 6) - Tipo de pago
+    const terminalSerialRaw = row[18];// Columna S (index 18)
+    const terminalSerial = String(terminalSerialRaw === null || terminalSerialRaw === undefined ? '' : terminalSerialRaw).trim();
+
+    // Validación opcional: Descartar cobros en efectivo y renglones sin terminal en Columna S
+    if (excludeCashAndEmpty) {
+      if (paymentType === 'efectivo') {
+        continue;
+      }
+      if (!terminalSerial || terminalSerial === '-' || terminalSerial.toLowerCase() === 'null' || terminalSerial.toLowerCase() === 'n/a') {
+        continue;
+      }
+    }
+
     const saleDateRaw = row[0];       // Columna A (index 0) - solo tomar hora
+    const concessionRaw = row[3];     // Columna D (index 3)
+    const sellerRaw = row[5];         // Columna F (index 5)
     const cardRaw = row[12];          // Columna M (index 12) - últimos 4 dígitos
     const authCodeRaw = row[17];      // Columna R (index 17)
-    const terminalSerialRaw = row[18];// Columna S (index 18)
 
     const parsedTime = extractTimeSeconds(saleDateRaw);
     const cardEnding = extractCardLast4(cardRaw);
     const authCode = normalizeAuthCode(authCodeRaw);
-    const terminalSerial = String(terminalSerialRaw || '').trim();
+    const concession = String(concessionRaw || '').trim();
+    const seller = String(sellerRaw || '').trim();
     // Columna K (index 10) - Monto Total orden generada Yoshi
     let totalAmount = extractAmount(row[10]);
     if (totalAmount <= 0 && row[7] !== undefined) {
@@ -179,6 +345,8 @@ export function parseGeneratedOrdersFile(rows: any[][]): GeneratedOrderRecord[] 
       timeSeconds: parsedTime ? parsedTime.seconds : -1,
       terminalSerial,
       totalAmount,
+      concession,
+      seller,
     });
   }
   return records;
@@ -264,49 +432,51 @@ export function performReconciliation(
   unregisteredTerminals: UnregisteredTerminalInfo[];
   summary: ReconciliationSummary;
 } {
+  const validations = getEffectiveValidations(options);
+
   // Step 1: Mapping terminals from Archivo 2 Columna S -> Base Col C -> Base Col D (Store ID)
-  // Build lookup map from terminalsCatalog: serialNumber -> storeId and vice versa
+  // Build lookup map from terminalsCatalog: serialNumber -> storeId
   const serialToStoreMap = new Map<string, string>();
-  const storeToSerialMap = new Map<string, string>();
   terminalsCatalog.forEach((t) => {
     const s = t.serialNumber.trim();
     const store = t.storeId.trim();
     if (s && store) {
       serialToStoreMap.set(s.toUpperCase(), store);
-      if (!storeToSerialMap.has(store.toUpperCase())) {
-        storeToSerialMap.set(store.toUpperCase(), s);
-      }
     }
   });
 
-  // Track terminal serials and frequency from Archivo 2 (Columna S)
+  // Track terminal serials and frequency ÚNICAMENTE de las que aparecen en Archivo 2 (Columna S)
+  // Ignoramos valores vacíos, guiones '-', 'null', 'n/a'
   const file2TerminalCounts = new Map<string, { original: string; count: number; sampleRow: number }>();
   for (let idx = 0; idx < generatedOrders.length; idx++) {
     const o = generatedOrders[idx];
-    if (o.terminalSerial) {
-      const trimmed = o.terminalSerial.trim();
-      const upper = trimmed.toUpperCase();
-      const existing = file2TerminalCounts.get(upper);
-      if (existing) {
-        existing.count += 1;
-      } else {
-        file2TerminalCounts.set(upper, { original: trimmed, count: 1, sampleRow: o.rowNumber });
-      }
+    const rawSerial = String(o.terminalSerial || '').trim();
+    if (!rawSerial || rawSerial === '-' || rawSerial.toLowerCase() === 'null' || rawSerial.toLowerCase() === 'n/a') {
+      continue;
+    }
+    const upper = rawSerial.toUpperCase();
+    const existing = file2TerminalCounts.get(upper);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      file2TerminalCounts.set(upper, { original: rawSerial, count: 1, sampleRow: o.rowNumber });
     }
   }
 
-  // Active Store IDs mapped from terminals that exist in the database
+  // Active Store IDs y StoreToSerialMap mapeados EXCLUSIVAMENTE desde las terminales presentes en Archivo 2
   const activeStoreIds = new Set<string>();
   const activeStoreIdsMap = new Map<string, string>();
+  const storeToSerialMap = new Map<string, string>();
   const unregisteredTerminalsList: UnregisteredTerminalInfo[] = [];
 
   file2TerminalCounts.forEach((data, upperSerial) => {
     const storeId = serialToStoreMap.get(upperSerial);
     if (storeId) {
-      activeStoreIds.add(storeId.toUpperCase());
+      const cleanStore = storeId.trim().toUpperCase();
+      activeStoreIds.add(cleanStore);
       activeStoreIdsMap.set(data.original, storeId);
-      // Prioritize the exact serial format as it appears in Archivo 2 Columna S
-      storeToSerialMap.set(storeId.toUpperCase(), data.original);
+      // Solo asociar Store ID a esta terminal si la terminal APARECE en Archivo 2
+      storeToSerialMap.set(cleanStore, data.original);
     } else {
       unregisteredTerminalsList.push({
         serialNumber: data.original,
@@ -319,29 +489,36 @@ export function performReconciliation(
   // Sort unregistered terminals with most affected orders first
   unregisteredTerminalsList.sort((a, b) => b.orderCount - a.orderCount);
 
-  // Assign terminalSerial (from Archivo 2 Col S / Catalog) to all transactions
-  transactions.forEach((tx) => {
-    if (tx.storeId) {
+  // Step 2: Filtrar Archivo 1 para procesar ÚNICAMENTE las transacciones que correspondan
+  // a las terminales que aparezcan en el Archivo 2 (a través de su Store ID o serial directo)
+  let filteredTransactions = transactions;
+  if (validations.filterByStoreId) {
+    if (activeStoreIds.size > 0) {
+      filteredTransactions = transactions.filter((tx) => {
+        // Si la transacción ya traía terminal desde Archivo 1, verificar que aparezca en Archivo 2
+        if (tx.terminalSerial && !file2TerminalCounts.has(tx.terminalSerial.trim().toUpperCase())) {
+          return false;
+        }
+        if (!tx.storeId) return false;
+        const txStore = tx.storeId.trim().toUpperCase();
+        return (
+          activeStoreIds.has(txStore) ||
+          Array.from(activeStoreIds).some((aid) => storeIdsMatch(aid, txStore))
+        );
+      });
+    } else if (file2TerminalCounts.size > 0) {
+      // Las terminales de Archivo 2 no tienen Store ID registrado en la base de datos
+      // No filtrar al azar otras tiendas ni meter transacciones no relacionadas
+      filteredTransactions = [];
+    }
+  }
+
+  // Asignar terminalSerial a las transacciones filtradas EXCLUSIVAMENTE desde las terminales presentes en Archivo 2
+  filteredTransactions.forEach((tx) => {
+    if (tx.storeId && !tx.terminalSerial) {
       tx.terminalSerial = storeToSerialMap.get(tx.storeId.trim().toUpperCase()) || '';
     }
   });
-
-  // Step 2: Filter Archivo 1 based on Columna P (Store ID) matching activeStoreIds
-  // If activeStoreIds has items, filter by them.
-  let filteredTransactions = transactions.filter((tx) => {
-    if (activeStoreIds.size === 0) return true;
-    return (
-      tx.storeId &&
-      (activeStoreIds.has(tx.storeId.trim().toUpperCase()) ||
-        Array.from(activeStoreIds).some((aid) => storeIdsMatch(aid, tx.storeId)))
-    );
-  });
-
-  // Safe fallback: If filtering by activeStoreIds reduced transactions to 0,
-  // but transactions existed in Archivo 1, preserve all transactions so the user doesn't get an artificial 0-match result.
-  if (filteredTransactions.length === 0 && transactions.length > 0) {
-    filteredTransactions = transactions;
-  }
 
   // Step 3: Match Archivo 1 vs Archivo 2
   // ULTRA-FAST HASH-INDEXED MATCHING:
@@ -381,80 +558,138 @@ export function performReconciliation(
   for (let i = 0; i < filteredTransactions.length; i++) {
     const tx = filteredTransactions[i];
     if (!tx.isApproved) continue; // Must be approved in both I and L
-    if (!tx.cardEnding || !tx.authCode) continue;
+    if (validations.matchCardEnding && !tx.cardEnding) continue;
+    if (validations.matchAuthCode && !tx.authCode) continue;
 
-    const rawKey = `${tx.cardEnding}_${tx.authCode}`;
-    const strippedKey = `${tx.cardEnding}_${getStrippedAuthCode(tx.authCode)}`;
+    let candidateOrderIndices: number[] | undefined;
 
-    let candidateOrderIndices = ordersByKey.get(rawKey);
-    if (!candidateOrderIndices || candidateOrderIndices.length === 0) {
-      candidateOrderIndices = ordersByKey.get(strippedKey);
-    }
-    // Fallback: Check orders with identical card last 4 using authCodesMatch
-    if (!candidateOrderIndices || candidateOrderIndices.length === 0) {
-      const cardList = ordersByCard.get(tx.cardEnding);
-      if (cardList && cardList.length > 0) {
-        candidateOrderIndices = cardList.filter((j) => authCodesMatch(tx.authCode, generatedOrders[j].authCode));
+    if (validations.matchCardEnding && validations.matchAuthCode) {
+      const rawKey = `${tx.cardEnding}_${tx.authCode}`;
+      const strippedKey = `${tx.cardEnding}_${getStrippedAuthCode(tx.authCode)}`;
+
+      candidateOrderIndices = ordersByKey.get(rawKey);
+      if (!candidateOrderIndices || candidateOrderIndices.length === 0) {
+        candidateOrderIndices = ordersByKey.get(strippedKey);
       }
+      // Fallback: Check orders with identical card last 4 using authCodesMatch
+      if (!candidateOrderIndices || candidateOrderIndices.length === 0) {
+        const cardList = ordersByCard.get(tx.cardEnding);
+        if (cardList && cardList.length > 0) {
+          candidateOrderIndices = cardList.filter((j) => authCodesMatch(tx.authCode, generatedOrders[j].authCode));
+        }
+      }
+    } else if (validations.matchCardEnding) {
+      candidateOrderIndices = ordersByCard.get(tx.cardEnding);
     }
 
-    if (!candidateOrderIndices || candidateOrderIndices.length === 0) continue;
+    const candidatesToIterate = candidateOrderIndices || generatedOrders.map((_, idx) => idx);
+    if (!candidatesToIterate || candidatesToIterate.length === 0) continue;
 
-    for (const j of candidateOrderIndices) {
+    let bestCandidate: {
+      orderIndex: number;
+      order: GeneratedOrderRecord;
+      diffSeconds: number;
+      score: number;
+    } | null = null;
+
+    for (const j of candidatesToIterate) {
       if (usedOrderIndices.has(j)) continue;
       const order = generatedOrders[j];
 
+      if (validations.matchCardEnding && tx.cardEnding !== order.cardEnding) {
+        continue;
+      }
+      if (validations.matchAuthCode && !authCodesMatch(tx.authCode, order.authCode)) {
+        continue;
+      }
+
       // Verificación de terminal: Si ambas órdenes tienen Store ID conocido y difieren, omitir
-      if (order.terminalSerial && tx.storeId) {
+      if (validations.matchStoreIdA1A2 && order.terminalSerial && tx.storeId) {
         const orderStoreId = serialToStoreMap.get(order.terminalSerial.trim().toUpperCase());
         if (orderStoreId && !storeIdsMatch(orderStoreId, tx.storeId)) {
           continue; // Pertenecen a dos tiendas físicas distintas
         }
       }
 
+      // Verificación de monto (A1 vs A2): Evita falsos positivos por tarjetas homónimas
+      let amountDiff = 0;
+      if (validations.matchAmountA1A2 && tx.amount > 0 && order.totalAmount > 0) {
+        amountDiff = Math.abs(tx.amount - order.totalAmount);
+        if (amountDiff > options.amountTolerance) {
+          continue; // Montos no coinciden; descartar
+        }
+      }
+
       // Time difference check: tx.time - order.time in seconds
-      let timeMatches = false;
+      let timeMatches = true;
       let diffSeconds = 0;
 
-      if (tx.timeSeconds >= 0 && order.timeSeconds >= 0) {
-        diffSeconds = tx.timeSeconds - order.timeSeconds;
-        // Margen de tiempo superior de +1 a +3 minutos (o ventana configurada)
-        if (diffSeconds >= options.minTimeDiffSeconds && diffSeconds <= options.maxTimeDiffSeconds) {
-          timeMatches = true;
-        } else if (Math.abs(diffSeconds) <= 600) {
-          // Tolerancia de hasta 10 minutos por desfasamiento de reloj entre terminal y banco
-          timeMatches = true;
-        } else if (Math.abs(Math.abs(diffSeconds) - 21600) <= 600 || Math.abs(Math.abs(diffSeconds) - 18000) <= 600) {
-          // Tolerancia para reporte bancario en UTC vs hora local (5 o 6 horas de desfase)
-          timeMatches = true;
+      if (validations.matchTimeWindowA1A2) {
+        timeMatches = false;
+        if (tx.timeSeconds >= 0 && order.timeSeconds >= 0) {
+          diffSeconds = tx.timeSeconds - order.timeSeconds;
+          // Ventana configurada (ej. 60 a 180 segundos)
+          if (diffSeconds >= options.minTimeDiffSeconds && diffSeconds <= options.maxTimeDiffSeconds) {
+            timeMatches = true;
+          } else if (Math.abs(diffSeconds) <= 600) {
+            // Tolerancia moderada de hasta 10 min por ligero desfasamiento de reloj
+            timeMatches = true;
+          } else if (Math.abs(Math.abs(diffSeconds) - 21600) <= 600 || Math.abs(Math.abs(diffSeconds) - 18000) <= 600) {
+            // Tolerancia para reporte bancario en UTC vs hora local (5 o 6 horas de desfase)
+            timeMatches = true;
+          }
         } else {
-          // Coincidencia exacta de tarjeta + autorización
           timeMatches = true;
         }
-      } else {
-        // Si no hay hora parseable, se confía en coincidencia de tarjeta + autorización
-        timeMatches = true;
+        if (!timeMatches) continue;
+      } else if (tx.timeSeconds >= 0 && order.timeSeconds >= 0) {
+        diffSeconds = tx.timeSeconds - order.timeSeconds;
       }
 
-      if (timeMatches) {
-        matchedTxIndices.add(i);
-        usedOrderIndices.add(j);
-
-        const diffMinutes = Math.round((diffSeconds / 60) * 10) / 10;
-        matchedWithOrders.push({
-          id: `match_ord_${tx.rowNumber}_${order.rowNumber}`,
-          transaction: tx,
-          generatedOrder: order,
-          timeDiffSeconds: diffSeconds,
-          timeDiffMinutesFormatted: `${diffMinutes >= 0 ? '+' : ''}${diffMinutes} min (${diffSeconds}s)`,
-          matchedStoreId: tx.storeId,
-        });
-        break;
+      // Scoring para asignar la mejor coincidencia exacta y no la primera que aparezca:
+      // - Monto exacto (penalización por centavos)
+      // - Distancia al tiempo esperado (~60s)
+      // - Bonificación si coincide la terminal física exacta
+      let score = amountDiff * 10 + Math.abs(diffSeconds - 60);
+      if (
+        order.terminalSerial &&
+        tx.terminalSerial &&
+        order.terminalSerial.trim().toUpperCase() === tx.terminalSerial.trim().toUpperCase()
+      ) {
+        score -= 500;
       }
+
+      if (!bestCandidate || score < bestCandidate.score) {
+        bestCandidate = {
+          orderIndex: j,
+          order,
+          diffSeconds,
+          score,
+        };
+      }
+    }
+
+    if (bestCandidate) {
+      matchedTxIndices.add(i);
+      usedOrderIndices.add(bestCandidate.orderIndex);
+
+      const diffMinutes = Math.round((bestCandidate.diffSeconds / 60) * 10) / 10;
+      matchedWithOrders.push({
+        id: `match_ord_${tx.rowNumber}_${bestCandidate.order.rowNumber}`,
+        transaction: tx,
+        generatedOrder: bestCandidate.order,
+        timeDiffSeconds: bestCandidate.diffSeconds,
+        timeDiffMinutesFormatted: `${diffMinutes >= 0 ? '+' : ''}${diffMinutes} min (${bestCandidate.diffSeconds}s)`,
+        matchedStoreId: tx.storeId,
+      });
     }
   }
 
-  // Step 4: Separate remaining transactions
+  // Step 4: Asignación previa de terminales a Archivo 3 antes de sacar aprobadas restantes:
+  if (validations.assignTerminalFromA2ToA3) {
+    matchAndAssignTerminalsToArch3(expiredOrders, generatedOrders, serialToStoreMap);
+  }
+
   // Remaining records: File 1 transactions with isApproved === true, within the filtered set,
   // that did NOT have a match with File 2
   const unmatchedApprovedTransactions = filteredTransactions.filter((tx, idx) => {
@@ -475,99 +710,204 @@ export function performReconciliation(
     indexedExpired.sort((a, b) => a.exp.timeSeconds - b.exp.timeSeconds);
 
     for (const tx of unmatchedApprovedTransactions) {
-      // Find candidate expired orders within time window [tx.timeSeconds - 300, tx.timeSeconds + 60]
+      let bestExpiredCandidate: {
+        item: (typeof indexedExpired)[0];
+        cand: {
+          type: PossibleExpiredChargeResult['marginType'];
+          label: string;
+          expected: number;
+        };
+        diffSeconds: number;
+        score: number;
+      } | null = null;
+
       for (let eIdx = 0; eIdx < indexedExpired.length; eIdx++) {
         const item = indexedExpired[eIdx];
         if (usedExpiredIndices.has(item.originalIdx)) continue;
         const exp = item.exp;
 
-        let timeMatches = false;
+        let timeMatches = true;
         let diffSeconds = 0;
 
-        if (tx.timeSeconds >= 0 && exp.timeSeconds >= 0) {
-          diffSeconds = tx.timeSeconds - exp.timeSeconds;
-          // Margen superior de 1 a 3 minutos (con tolerancia hasta 4 minutos)
-          if (diffSeconds >= options.minTimeDiffSeconds && diffSeconds <= options.maxTimeDiffSeconds) {
+        if (validations.matchTimeWindowA1A3) {
+          timeMatches = false;
+          if (tx.timeSeconds >= 0 && exp.timeSeconds >= 0) {
+            diffSeconds = tx.timeSeconds - exp.timeSeconds;
+            // Solo considerar si el cobro fue posterior o casi simultáneo a la orden expirada (0 a 240s o ventana configurada)
+            if (diffSeconds >= options.minTimeDiffSeconds && diffSeconds <= options.maxTimeDiffSeconds) {
+              timeMatches = true;
+            } else if (diffSeconds >= 0 && diffSeconds <= 240) {
+              timeMatches = true;
+            }
+          } else {
             timeMatches = true;
-          } else if (diffSeconds >= 0 && diffSeconds <= 240) {
-            timeMatches = true;
-          } else if (diffSeconds < -60) {
-            // Since array is sorted by timeSeconds, if diff is far negative, later ones will be even more negative
-            // but we continue safely
           }
-        } else {
-          timeMatches = true;
+          if (!timeMatches) continue;
+        } else if (tx.timeSeconds >= 0 && exp.timeSeconds >= 0) {
+          diffSeconds = tx.timeSeconds - exp.timeSeconds;
         }
 
-        if (!timeMatches) continue;
+        // Validación: Exigir que la orden expirada tenga terminal asignada
+        if (validations.requireTerminalForExpired) {
+          if (!exp.terminalSerial || exp.terminalSerial === '—' || !exp.terminalSerial.trim()) {
+            continue; // Sin terminal asignada en Archivo 2 (ej. ventas solo en efectivo); descartar
+          }
+        }
+
+        // Validación: Cotejar terminal física o Store ID confirmado
+        const terminalMatches = Boolean(
+          tx.terminalSerial &&
+          exp.terminalSerial &&
+          tx.terminalSerial.trim().toUpperCase() === exp.terminalSerial.trim().toUpperCase()
+        );
+
+        const storeMatches = Boolean(
+          tx.storeId &&
+          exp.storeId &&
+          storeIdsMatch(tx.storeId, exp.storeId)
+        );
+
+        if (validations.matchTerminalOrStoreA1A3) {
+          if (!terminalMatches && !storeMatches) {
+            continue; // No corresponden a la misma terminal ni al mismo Store ID
+          }
+        }
 
         // Amount match check
         const baseAmt = exp.baseAmount;
         const totalAmt = exp.totalAmount;
         const valH = totalAmt > 0 ? totalAmt : baseAmt;
 
-        const candidates: Array<{
+        // Candidatos de monto exacto (Prioridad 1)
+        const exactCandidates: Array<{
           type: PossibleExpiredChargeResult['marginType'];
           label: string;
           expected: number;
         }> = [
           { type: 'total_exact', label: `Exacto sin propina ($${valH.toFixed(2)})`, expected: Math.round(valH * 100) / 100 },
-          { type: 'plus_5', label: `+5% por posible propina ($${(valH * 1.05).toFixed(2)})`, expected: Math.round(valH * 1.05 * 100) / 100 },
-          { type: 'plus_10', label: `+10% por posible propina ($${(valH * 1.10).toFixed(2)})`, expected: Math.round(valH * 1.10 * 100) / 100 },
-          { type: 'plus_15', label: `+15% por posible propina ($${(valH * 1.15).toFixed(2)})`, expected: Math.round(valH * 1.15 * 100) / 100 },
-          { type: 'plus_20', label: `+20% por posible propina ($${(valH * 1.20).toFixed(2)})`, expected: Math.round(valH * 1.20 * 100) / 100 },
         ];
-
         if (baseAmt > 0 && Math.abs(baseAmt - valH) > 0.01) {
-          candidates.push(
-            { type: 'base_exact', label: `Exacto Col G sin propina ($${baseAmt.toFixed(2)})`, expected: Math.round(baseAmt * 100) / 100 },
-            { type: 'plus_5', label: `+5% por posible propina sobre Col G ($${(baseAmt * 1.05).toFixed(2)})`, expected: Math.round(baseAmt * 1.05 * 100) / 100 },
-            { type: 'plus_10', label: `+10% por posible propina sobre Col G ($${(baseAmt * 1.10).toFixed(2)})`, expected: Math.round(baseAmt * 1.10 * 100) / 100 },
-            { type: 'plus_15', label: `+15% por posible propina sobre Col G ($${(baseAmt * 1.15).toFixed(2)})`, expected: Math.round(baseAmt * 1.15 * 100) / 100 },
-            { type: 'plus_20', label: `+20% por posible propina sobre Col G ($${(baseAmt * 1.20).toFixed(2)})`, expected: Math.round(baseAmt * 1.20 * 100) / 100 }
+          exactCandidates.push(
+            { type: 'base_exact', label: `Exacto Col G sin propina ($${baseAmt.toFixed(2)})`, expected: Math.round(baseAmt * 100) / 100 }
           );
         }
 
-        let matchedCandidate: (typeof candidates)[0] | null = null;
-        for (const cand of candidates) {
-          if (cand.expected <= 0) continue;
-          if (Math.abs(tx.amount - cand.expected) <= options.amountTolerance) {
-            matchedCandidate = cand;
-            break;
+        // Candidatos con incremento de propina (Prioridad 2, si está habilitado)
+        const tipCandidates: Array<{
+          type: PossibleExpiredChargeResult['marginType'];
+          label: string;
+          expected: number;
+        }> = [];
+        const useTips = validations.enableTipIncrements && options.enableTipIncrements !== false;
+        if (useTips) {
+          tipCandidates.push(
+            { type: 'plus_5', label: `+5% por posible propina ($${(valH * 1.05).toFixed(2)})`, expected: Math.round(valH * 1.05 * 100) / 100 },
+            { type: 'plus_10', label: `+10% por posible propina ($${(valH * 1.10).toFixed(2)})`, expected: Math.round(valH * 1.10 * 100) / 100 },
+            { type: 'plus_15', label: `+15% por posible propina ($${(valH * 1.15).toFixed(2)})`, expected: Math.round(valH * 1.15 * 100) / 100 },
+            { type: 'plus_20', label: `+20% por posible propina ($${(valH * 1.20).toFixed(2)})`, expected: Math.round(valH * 1.20 * 100) / 100 }
+          );
+          if (baseAmt > 0 && Math.abs(baseAmt - valH) > 0.01) {
+            tipCandidates.push(
+              { type: 'plus_5', label: `+5% por posible propina sobre Col G ($${(baseAmt * 1.05).toFixed(2)})`, expected: Math.round(baseAmt * 1.05 * 100) / 100 },
+              { type: 'plus_10', label: `+10% por posible propina sobre Col G ($${(baseAmt * 1.10).toFixed(2)})`, expected: Math.round(baseAmt * 1.10 * 100) / 100 },
+              { type: 'plus_15', label: `+15% por posible propina sobre Col G ($${(baseAmt * 1.15).toFixed(2)})`, expected: Math.round(baseAmt * 1.15 * 100) / 100 },
+              { type: 'plus_20', label: `+20% por posible propina sobre Col G ($${(baseAmt * 1.20).toFixed(2)})`, expected: Math.round(baseAmt * 1.20 * 100) / 100 }
+            );
           }
         }
 
-        if (matchedCandidate || (tx.amount === 0 && timeMatches)) {
-          usedExpiredIndices.add(item.originalIdx);
+        let matchedCandidate: {
+          type: PossibleExpiredChargeResult['marginType'];
+          label: string;
+          expected: number;
+        } | null = null;
+        let isTipMatch = false;
 
-          const diffMinutes = Math.round((diffSeconds / 60) * 10) / 10;
-          possibleExpiredCharges.push({
-            id: `exp_charge_${tx.rowNumber}_${exp.rowNumber}`,
-            transaction: tx,
-            expiredOrder: exp,
-            marginType: matchedCandidate ? matchedCandidate.type : 'total_exact',
-            marginLabel: matchedCandidate ? matchedCandidate.label : 'Coincidencia de Hora',
-            calculatedExpectedAmount: matchedCandidate ? matchedCandidate.expected : exp.totalAmount,
-            timeDiffSeconds: diffSeconds,
-            timeDiffFormatted: `+${diffMinutes} min (${diffSeconds}s)`,
-            horaArchivo1: tx.timeStr,
-            horaArchivo3: exp.timeStr,
-            montoArchivo1: tx.amount,
-            montoArchivo2Total: 0,
-            montoArchivo3Total: exp.totalAmount > 0 ? exp.totalAmount : exp.baseAmount,
-            montoArchivo3Base: exp.baseAmount,
-            storeIdArchivo1: tx.storeId,
-            terminalSerialArchivo2: tx.terminalSerial || (tx.storeId ? storeToSerialMap.get(tx.storeId.trim().toUpperCase()) : '') || '—',
-            concesionArchivo3: exp.concession,
-            codigoArchivo3: exp.code,
-            vendedorArchivo3: exp.seller,
-            terminacionTarjetaArchivo1: tx.cardEnding,
-            codigoAutorizacionArchivo1: tx.authCode,
-            estatusIArchivo1: tx.statusI,
-            estatusLArchivo1: tx.statusL,
-          });
-          break;
+        if (validations.matchAmountA1A3) {
+          // Primero buscar coincidencia exacta (100% libre de falsos positivos)
+          for (const cand of exactCandidates) {
+            if (cand.expected <= 0) continue;
+            if (Math.abs(tx.amount - cand.expected) <= options.amountTolerance) {
+              matchedCandidate = cand;
+              isTipMatch = false;
+              break;
+            }
+          }
+          // Solo si no hubo coincidencia exacta y se permiten propinas, buscar en propinas
+          if (!matchedCandidate && useTips) {
+            for (const cand of tipCandidates) {
+              if (cand.expected <= 0) continue;
+              if (Math.abs(tx.amount - cand.expected) <= options.amountTolerance) {
+                matchedCandidate = cand;
+                isTipMatch = true;
+                break;
+              }
+            }
+          }
+          if (!matchedCandidate && tx.amount > 0) {
+            continue;
+          }
+        } else {
+          matchedCandidate = exactCandidates[0];
         }
+
+        if (matchedCandidate || (tx.amount === 0 && timeMatches) || (!validations.matchAmountA1A3)) {
+          // Scoring: Menor score = mejor candidato
+          // Coincidencia exacta: 0 penalización; con propina: +300 penalización
+          // Coincidencia de terminal física exacta: bonificación de -400
+          // Menor desviación del tiempo estándar (~75s): Math.abs(diffSeconds - 75)
+          let score = (isTipMatch ? 300 : 0) + Math.abs(diffSeconds - 75);
+          if (terminalMatches) score -= 400;
+
+          if (!bestExpiredCandidate || score < bestExpiredCandidate.score) {
+            bestExpiredCandidate = {
+              item,
+              cand: matchedCandidate || exactCandidates[0],
+              diffSeconds,
+              score,
+            };
+          }
+        }
+      }
+
+      if (bestExpiredCandidate) {
+        const { item, cand, diffSeconds } = bestExpiredCandidate;
+        usedExpiredIndices.add(item.originalIdx);
+        const exp = item.exp;
+        const diffMinutes = Math.round((diffSeconds / 60) * 10) / 10;
+        possibleExpiredCharges.push({
+          id: `exp_charge_${tx.rowNumber}_${exp.rowNumber}`,
+          transaction: tx,
+          expiredOrder: exp,
+          marginType: cand.type,
+          marginLabel: cand.label,
+          calculatedExpectedAmount: cand.expected,
+          timeDiffSeconds: diffSeconds,
+          timeDiffFormatted: `+${diffMinutes} min (${diffSeconds}s)`,
+          horaArchivo1: tx.timeStr,
+          horaArchivo3: exp.timeStr,
+          montoArchivo1: tx.amount,
+          montoArchivo2Total: 0,
+          montoArchivo3Total: exp.totalAmount > 0 ? exp.totalAmount : exp.baseAmount,
+          montoArchivo3Base: exp.baseAmount,
+          storeIdArchivo1: tx.storeId,
+          terminalSerialArchivo2: tx.terminalSerial || (tx.storeId ? storeToSerialMap.get(tx.storeId.trim().toUpperCase()) : '') || '—',
+          terminalSerialArchivo3: exp.terminalSerial || '—',
+          storeIdArchivo3: exp.storeId || '—',
+          terminalMatchConfirmed: Boolean(
+            exp.terminalSerial && (
+              tx.terminalSerial === exp.terminalSerial ||
+              (tx.storeId && exp.storeId && storeIdsMatch(tx.storeId, exp.storeId))
+            )
+          ),
+          concesionArchivo3: exp.concession,
+          codigoArchivo3: exp.code,
+          vendedorArchivo3: exp.seller,
+          terminacionTarjetaArchivo1: tx.cardEnding,
+          codigoAutorizacionArchivo1: tx.authCode,
+          estatusIArchivo1: tx.statusI,
+          estatusLArchivo1: tx.statusL,
+        });
       }
     }
   }
@@ -624,6 +964,7 @@ export async function performReconciliationStreaming(
   isPausedCheck?: () => boolean
 ): Promise<void> {
   const getDelay = () => (typeof speedDelayOrGetter === 'function' ? speedDelayOrGetter() : speedDelayOrGetter);
+  const validations = getEffectiveValidations(options);
 
   const waitWithPause = async (ms: number) => {
     let elapsed = 0;
@@ -641,44 +982,42 @@ export async function performReconciliationStreaming(
 
   // Step 1: Mapping terminals from Archivo 2 Columna S -> Base Col C -> Base Col D (Store ID)
   const serialToStoreMap = new Map<string, string>();
-  const storeToSerialMap = new Map<string, string>();
   terminalsCatalog.forEach((t) => {
     const s = t.serialNumber.trim();
     const store = t.storeId.trim();
     if (s && store) {
       serialToStoreMap.set(s.toUpperCase(), store);
-      if (!storeToSerialMap.has(store.toUpperCase())) {
-        storeToSerialMap.set(store.toUpperCase(), s);
-      }
     }
   });
 
   const file2TerminalCounts = new Map<string, { original: string; count: number; sampleRow: number }>();
   for (let idx = 0; idx < generatedOrders.length; idx++) {
     const o = generatedOrders[idx];
-    if (o.terminalSerial) {
-      const trimmed = o.terminalSerial.trim();
-      const upper = trimmed.toUpperCase();
-      const existing = file2TerminalCounts.get(upper);
-      if (existing) {
-        existing.count += 1;
-      } else {
-        file2TerminalCounts.set(upper, { original: trimmed, count: 1, sampleRow: o.rowNumber });
-      }
+    const rawSerial = String(o.terminalSerial || '').trim();
+    if (!rawSerial || rawSerial === '-' || rawSerial.toLowerCase() === 'null' || rawSerial.toLowerCase() === 'n/a') {
+      continue;
+    }
+    const upper = rawSerial.toUpperCase();
+    const existing = file2TerminalCounts.get(upper);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      file2TerminalCounts.set(upper, { original: rawSerial, count: 1, sampleRow: o.rowNumber });
     }
   }
 
   const activeStoreIds = new Set<string>();
   const activeStoreIdsMap = new Map<string, string>();
+  const storeToSerialMap = new Map<string, string>();
   const unregisteredTerminalsList: UnregisteredTerminalInfo[] = [];
 
   file2TerminalCounts.forEach((data, upperSerial) => {
     const storeId = serialToStoreMap.get(upperSerial);
     if (storeId) {
-      activeStoreIds.add(storeId.toUpperCase());
+      const cleanStore = storeId.trim().toUpperCase();
+      activeStoreIds.add(cleanStore);
       activeStoreIdsMap.set(data.original, storeId);
-      // Prioritize the exact serial format as it appears in Archivo 2 Columna S
-      storeToSerialMap.set(storeId.toUpperCase(), data.original);
+      storeToSerialMap.set(cleanStore, data.original);
     } else {
       unregisteredTerminalsList.push({
         serialNumber: data.original,
@@ -690,16 +1029,30 @@ export async function performReconciliationStreaming(
 
   unregisteredTerminalsList.sort((a, b) => b.orderCount - a.orderCount);
 
-  // Assign terminalSerial to all transactions
-  transactions.forEach((tx) => {
-    if (tx.storeId) {
+  let filteredTransactions = transactions;
+  if (validations.filterByStoreId) {
+    if (activeStoreIds.size > 0) {
+      filteredTransactions = transactions.filter((tx) => {
+        if (tx.terminalSerial && !file2TerminalCounts.has(tx.terminalSerial.trim().toUpperCase())) {
+          return false;
+        }
+        if (!tx.storeId) return false;
+        const txStore = tx.storeId.trim().toUpperCase();
+        return (
+          activeStoreIds.has(txStore) ||
+          Array.from(activeStoreIds).some((aid) => storeIdsMatch(aid, txStore))
+        );
+      });
+    } else if (file2TerminalCounts.size > 0) {
+      filteredTransactions = [];
+    }
+  }
+
+  // Assign terminalSerial to all filtered transactions strictly from Archivo 2
+  filteredTransactions.forEach((tx) => {
+    if (tx.storeId && !tx.terminalSerial) {
       tx.terminalSerial = storeToSerialMap.get(tx.storeId.trim().toUpperCase()) || '';
     }
-  });
-
-  const filteredTransactions = transactions.filter((tx) => {
-    if (activeStoreIds.size === 0) return true;
-    return tx.storeId && activeStoreIds.has(tx.storeId.trim().toUpperCase());
   });
 
   const buildSummary = (
@@ -766,45 +1119,88 @@ export async function performReconciliationStreaming(
       amount: tx.amount,
     };
 
-    if (tx.isApproved && tx.cardEnding && tx.authCode) {
-      for (let j = 0; j < generatedOrders.length; j++) {
-        if (usedOrderIndices.has(j)) continue;
-        const order = generatedOrders[j];
+    if (tx.isApproved) {
+      if (validations.matchCardEnding && !tx.cardEnding) {
+        // Skip tx without card ending if validation is required
+      } else if (validations.matchAuthCode && !tx.authCode) {
+        // Skip tx without auth code if validation is required
+      } else {
+        let bestCandidate: {
+          orderIndex: number;
+          order: GeneratedOrderRecord;
+          diffSeconds: number;
+          score: number;
+        } | null = null;
 
-        const cardMatches = tx.cardEnding === order.cardEnding;
-        const authMatches = authCodesMatch(tx.authCode, order.authCode);
+        for (let j = 0; j < generatedOrders.length; j++) {
+          if (usedOrderIndices.has(j)) continue;
+          const order = generatedOrders[j];
 
-        if (!cardMatches || !authMatches) continue;
+          if (validations.matchCardEnding && tx.cardEnding !== order.cardEnding) continue;
+          if (validations.matchAuthCode && !authCodesMatch(tx.authCode, order.authCode)) continue;
 
-        // Verificación de terminal: Si ambas tienen Store ID conocido y difieren, omitir
-        if (order.terminalSerial && tx.storeId) {
-          const orderStoreId = serialToStoreMap.get(order.terminalSerial.trim().toUpperCase());
-          if (orderStoreId && !storeIdsMatch(orderStoreId, tx.storeId)) {
-            continue; // Pertenecen a dos tiendas físicas distintas
+          // Verificación de terminal: Si ambas tienen Store ID conocido y difieren, omitir
+          if (validations.matchStoreIdA1A2 && order.terminalSerial && tx.storeId) {
+            const orderStoreId = serialToStoreMap.get(order.terminalSerial.trim().toUpperCase());
+            if (orderStoreId && !storeIdsMatch(orderStoreId, tx.storeId)) {
+              continue; // Pertenecen a dos tiendas físicas distintas
+            }
+          }
+
+          // Verificación de monto (A1 vs A2): Evita falsos positivos por tarjetas homónimas
+          let amountDiff = 0;
+          if (validations.matchAmountA1A2 && tx.amount > 0 && order.totalAmount > 0) {
+            amountDiff = Math.abs(tx.amount - order.totalAmount);
+            if (amountDiff > options.amountTolerance) {
+              continue; // Montos no coinciden; descartar
+            }
+          }
+
+          let timeMatches = true;
+          let diffSeconds = 0;
+
+          if (validations.matchTimeWindowA1A2) {
+            timeMatches = false;
+            if (tx.timeSeconds >= 0 && order.timeSeconds >= 0) {
+              diffSeconds = tx.timeSeconds - order.timeSeconds;
+              if (diffSeconds >= options.minTimeDiffSeconds && diffSeconds <= options.maxTimeDiffSeconds) {
+                timeMatches = true;
+              } else if (Math.abs(diffSeconds) <= 600) {
+                timeMatches = true;
+              } else if (Math.abs(Math.abs(diffSeconds) - 21600) <= 600 || Math.abs(Math.abs(diffSeconds) - 18000) <= 600) {
+                timeMatches = true;
+              }
+            } else {
+              timeMatches = true;
+            }
+            if (!timeMatches) continue;
+          } else if (tx.timeSeconds >= 0 && order.timeSeconds >= 0) {
+            diffSeconds = tx.timeSeconds - order.timeSeconds;
+          }
+
+          let score = amountDiff * 10 + Math.abs(diffSeconds - 60);
+          if (
+            order.terminalSerial &&
+            tx.terminalSerial &&
+            order.terminalSerial.trim().toUpperCase() === tx.terminalSerial.trim().toUpperCase()
+          ) {
+            score -= 500;
+          }
+
+          if (!bestCandidate || score < bestCandidate.score) {
+            bestCandidate = {
+              orderIndex: j,
+              order,
+              diffSeconds,
+              score,
+            };
           }
         }
 
-        let timeMatches = false;
-        let diffSeconds = 0;
-
-        if (tx.timeSeconds >= 0 && order.timeSeconds >= 0) {
-          diffSeconds = tx.timeSeconds - order.timeSeconds;
-          if (diffSeconds >= options.minTimeDiffSeconds && diffSeconds <= options.maxTimeDiffSeconds) {
-            timeMatches = true;
-          } else if (Math.abs(diffSeconds) <= 600) {
-            timeMatches = true;
-          } else if (Math.abs(Math.abs(diffSeconds) - 21600) <= 600 || Math.abs(Math.abs(diffSeconds) - 18000) <= 600) {
-            timeMatches = true;
-          } else {
-            timeMatches = true;
-          }
-        } else {
-          timeMatches = true;
-        }
-
-        if (timeMatches) {
+        if (bestCandidate) {
+          const { orderIndex, order, diffSeconds } = bestCandidate;
           matchedTxIndices.add(i);
-          usedOrderIndices.add(j);
+          usedOrderIndices.add(orderIndex);
           foundMatchInOrder = true;
 
           // Clear previous latest flag
@@ -850,7 +1246,6 @@ export async function performReconciliationStreaming(
           if (currentDelay > 0) {
             await waitWithPause(currentDelay);
           }
-          break;
         }
       }
     }
@@ -888,12 +1283,17 @@ export async function performReconciliationStreaming(
     }
   }
 
-  // Step 3: Unmatched Approved transactions
+  // Step 3: Asignación previa de terminales a Archivo 3 antes de sacar aprobadas restantes:
+  if (validations.assignTerminalFromA2ToA3) {
+    matchAndAssignTerminalsToArch3(expiredOrders, generatedOrders, serialToStoreMap);
+  }
+
+  // Step 4: Unmatched Approved transactions
   const unmatchedApprovedTransactions = filteredTransactions.filter((tx, idx) => {
     return tx.isApproved && !matchedTxIndices.has(idx);
   });
 
-  // Step 4: Matching remaining vs Archivo 3 (Expired Orders) row-by-row
+  // Step 5: Matching remaining vs Archivo 3 (Expired Orders) row-by-row
   const possibleExpiredCharges: PossibleExpiredChargeResult[] = [];
   const usedExpiredIndices = new Set<number>();
 
@@ -913,125 +1313,233 @@ export async function performReconciliationStreaming(
         amount: tx.amount,
       };
 
+      let bestExpiredCandidate: {
+        expiredIndex: number;
+        exp: ExpiredOrderRecord;
+        cand: {
+          type: PossibleExpiredChargeResult['marginType'];
+          label: string;
+          expected: number;
+        };
+        diffSeconds: number;
+        score: number;
+      } | null = null;
+
       for (let m = 0; m < expiredOrders.length; m++) {
         if (usedExpiredIndices.has(m)) continue;
         const exp = expiredOrders[m];
 
-        let timeMatches = false;
+        let timeMatches = true;
         let diffSeconds = 0;
 
-        if (tx.timeSeconds >= 0 && exp.timeSeconds >= 0) {
-          diffSeconds = tx.timeSeconds - exp.timeSeconds;
-          if (diffSeconds >= options.minTimeDiffSeconds && diffSeconds <= options.maxTimeDiffSeconds) {
-            timeMatches = true;
-          } else if (diffSeconds >= 0 && diffSeconds <= 240) {
+        if (validations.matchTimeWindowA1A3) {
+          timeMatches = false;
+          if (tx.timeSeconds >= 0 && exp.timeSeconds >= 0) {
+            diffSeconds = tx.timeSeconds - exp.timeSeconds;
+            // Solo considerar si el cobro fue posterior o casi simultáneo a la orden expirada (0 a 240s o ventana configurada)
+            if (diffSeconds >= options.minTimeDiffSeconds && diffSeconds <= options.maxTimeDiffSeconds) {
+              timeMatches = true;
+            } else if (diffSeconds >= 0 && diffSeconds <= 240) {
+              timeMatches = true;
+            }
+          } else {
             timeMatches = true;
           }
-        } else {
-          timeMatches = true;
+          if (!timeMatches) continue;
+        } else if (tx.timeSeconds >= 0 && exp.timeSeconds >= 0) {
+          diffSeconds = tx.timeSeconds - exp.timeSeconds;
         }
 
-        if (!timeMatches) continue;
+        // Validación: Exigir que la orden expirada tenga terminal asignada
+        if (validations.requireTerminalForExpired) {
+          if (!exp.terminalSerial || exp.terminalSerial === '—' || !exp.terminalSerial.trim()) {
+            continue; // Sin terminal asignada en Archivo 2 (ej. ventas solo en efectivo); descartar
+          }
+        }
+
+        // Validación: Cotejar terminal física o Store ID confirmado
+        const terminalMatches = Boolean(
+          tx.terminalSerial &&
+          exp.terminalSerial &&
+          tx.terminalSerial.trim().toUpperCase() === exp.terminalSerial.trim().toUpperCase()
+        );
+
+        const storeMatches = Boolean(
+          tx.storeId &&
+          exp.storeId &&
+          storeIdsMatch(tx.storeId, exp.storeId)
+        );
+
+        if (validations.matchTerminalOrStoreA1A3) {
+          if (!terminalMatches && !storeMatches) {
+            continue; // No corresponden a la misma terminal ni al mismo Store ID
+          }
+        }
 
         const baseAmt = exp.baseAmount;
         const totalAmt = exp.totalAmount;
         const valH = totalAmt > 0 ? totalAmt : baseAmt;
 
-        const candidates: Array<{
+        // Candidatos de monto exacto (Prioridad 1)
+        const exactCandidates: Array<{
           type: PossibleExpiredChargeResult['marginType'];
           label: string;
           expected: number;
         }> = [
           { type: 'total_exact' as const, label: `Exacto sin propina ($${valH.toFixed(2)})`, expected: Math.round(valH * 100) / 100 },
-          { type: 'plus_5' as const, label: `+5% por posible propina ($${(valH * 1.05).toFixed(2)})`, expected: Math.round(valH * 1.05 * 100) / 100 },
-          { type: 'plus_10' as const, label: `+10% por posible propina ($${(valH * 1.10).toFixed(2)})`, expected: Math.round(valH * 1.10 * 100) / 100 },
-          { type: 'plus_15' as const, label: `+15% por posible propina ($${(valH * 1.15).toFixed(2)})`, expected: Math.round(valH * 1.15 * 100) / 100 },
-          { type: 'plus_20' as const, label: `+20% por posible propina ($${(valH * 1.20).toFixed(2)})`, expected: Math.round(valH * 1.20 * 100) / 100 },
         ];
-
         if (baseAmt > 0 && Math.abs(baseAmt - valH) > 0.01) {
-          candidates.push(
-            { type: 'base_exact' as const, label: `Exacto Col G sin propina ($${baseAmt.toFixed(2)})`, expected: Math.round(baseAmt * 100) / 100 },
-            { type: 'plus_5' as const, label: `+5% por posible propina sobre Col G ($${(baseAmt * 1.05).toFixed(2)})`, expected: Math.round(baseAmt * 1.05 * 100) / 100 },
-            { type: 'plus_10' as const, label: `+10% por posible propina sobre Col G ($${(baseAmt * 1.10).toFixed(2)})`, expected: Math.round(baseAmt * 1.10 * 100) / 100 },
-            { type: 'plus_15' as const, label: `+15% por posible propina sobre Col G ($${(baseAmt * 1.15).toFixed(2)})`, expected: Math.round(baseAmt * 1.15 * 100) / 100 },
-            { type: 'plus_20' as const, label: `+20% por posible propina sobre Col G ($${(baseAmt * 1.20).toFixed(2)})`, expected: Math.round(baseAmt * 1.20 * 100) / 100 }
+          exactCandidates.push(
+            { type: 'base_exact' as const, label: `Exacto Col G sin propina ($${baseAmt.toFixed(2)})`, expected: Math.round(baseAmt * 100) / 100 }
           );
         }
 
-        let matchedCandidate: (typeof candidates)[0] | null = null;
-        for (const cand of candidates) {
-          if (cand.expected <= 0) continue;
-          if (Math.abs(tx.amount - cand.expected) <= options.amountTolerance) {
-            matchedCandidate = cand;
-            break;
+        // Candidatos con incremento de propina (Prioridad 2, si está habilitado)
+        const tipCandidates: Array<{
+          type: PossibleExpiredChargeResult['marginType'];
+          label: string;
+          expected: number;
+        }> = [];
+        const useTips = validations.enableTipIncrements && options.enableTipIncrements !== false;
+        if (useTips) {
+          tipCandidates.push(
+            { type: 'plus_5' as const, label: `+5% por posible propina ($${(valH * 1.05).toFixed(2)})`, expected: Math.round(valH * 1.05 * 100) / 100 },
+            { type: 'plus_10' as const, label: `+10% por posible propina ($${(valH * 1.10).toFixed(2)})`, expected: Math.round(valH * 1.10 * 100) / 100 },
+            { type: 'plus_15' as const, label: `+15% por posible propina ($${(valH * 1.15).toFixed(2)})`, expected: Math.round(valH * 1.15 * 100) / 100 },
+            { type: 'plus_20' as const, label: `+20% por posible propina ($${(valH * 1.20).toFixed(2)})`, expected: Math.round(valH * 1.20 * 100) / 100 }
+          );
+          if (baseAmt > 0 && Math.abs(baseAmt - valH) > 0.01) {
+            tipCandidates.push(
+              { type: 'plus_5' as const, label: `+5% por posible propina sobre Col G ($${(baseAmt * 1.05).toFixed(2)})`, expected: Math.round(baseAmt * 1.05 * 100) / 100 },
+              { type: 'plus_10' as const, label: `+10% por posible propina sobre Col G ($${(baseAmt * 1.10).toFixed(2)})`, expected: Math.round(baseAmt * 1.10 * 100) / 100 },
+              { type: 'plus_15' as const, label: `+15% por posible propina sobre Col G ($${(baseAmt * 1.15).toFixed(2)})`, expected: Math.round(baseAmt * 1.15 * 100) / 100 },
+              { type: 'plus_20' as const, label: `+20% por posible propina sobre Col G ($${(baseAmt * 1.20).toFixed(2)})`, expected: Math.round(baseAmt * 1.20 * 100) / 100 }
+            );
           }
         }
 
-        if (matchedCandidate || (tx.amount === 0 && timeMatches)) {
-          usedExpiredIndices.add(m);
-          foundExpired = true;
+        let matchedCandidate: {
+          type: PossibleExpiredChargeResult['marginType'];
+          label: string;
+          expected: number;
+        } | null = null;
+        let isTipMatch = false;
 
-          possibleExpiredCharges.forEach((p) => {
-            p.isLatestMatch = false;
-          });
-
-          const diffMinutes = Math.round((diffSeconds / 60) * 10) / 10;
-          const newExpCharge: PossibleExpiredChargeResult = {
-            id: `exp_charge_${tx.rowNumber}_${exp.rowNumber}`,
-            transaction: tx,
-            expiredOrder: exp,
-            marginType: matchedCandidate ? matchedCandidate.type : 'total_exact',
-            marginLabel: matchedCandidate ? matchedCandidate.label : 'Coincidencia de Hora',
-            calculatedExpectedAmount: matchedCandidate ? matchedCandidate.expected : exp.totalAmount,
-            timeDiffSeconds: diffSeconds,
-            timeDiffFormatted: `+${diffMinutes} min (${diffSeconds}s)`,
-            horaArchivo1: tx.timeStr,
-            horaArchivo3: exp.timeStr,
-            montoArchivo1: tx.amount,
-            montoArchivo2Total: 0,
-            montoArchivo3Total: exp.totalAmount > 0 ? exp.totalAmount : exp.baseAmount,
-            montoArchivo3Base: exp.baseAmount,
-            storeIdArchivo1: tx.storeId,
-            terminalSerialArchivo2: tx.terminalSerial || (tx.storeId ? storeToSerialMap.get(tx.storeId.trim().toUpperCase()) : '') || '—',
-            concesionArchivo3: exp.concession,
-            codigoArchivo3: exp.code,
-            vendedorArchivo3: exp.seller,
-            terminacionTarjetaArchivo1: tx.cardEnding,
-            codigoAutorizacionArchivo1: tx.authCode,
-            estatusIArchivo1: tx.statusI,
-            estatusLArchivo1: tx.statusL,
-            isLatestMatch: true,
-          };
-          possibleExpiredCharges.push(newExpCharge);
-
-          const progressPercent = Math.round(60 + ((k + 1) / unmatchedApprovedTransactions.length) * 38);
-          onProgress({
-            matchedWithOrders: [...matchedWithOrders],
-            unmatchedApprovedTransactions: [...unmatchedApprovedTransactions],
-            possibleExpiredCharges: [...possibleExpiredCharges],
-            activeStoreIdsMap,
-            summary: buildSummary(matchedWithOrders, unmatchedApprovedTransactions, possibleExpiredCharges),
-            progressState: {
-              isStreaming: true,
-              phase: 'matching_expired',
-              phaseDescription: `Cotejando restantes con Órdenes Expiradas (${k + 1} de ${unmatchedApprovedTransactions.length})...`,
-              progressPercent,
-              totalTransactionsToProcess: unmatchedApprovedTransactions.length,
-              currentProcessedIndex: k + 1,
-              matchedCountLive: matchedWithOrders.length,
-              expiredMatchesCountLive: possibleExpiredCharges.length,
-              lastMatchedMessage: `¡Posible Expirada Detectada!: ${exp.concession} • $${tx.amount.toFixed(2)} (${newExpCharge.marginLabel})`,
-              currentBatchItemText: `TX Renglón ${tx.rowNumber} • Hora ${tx.timeStr}`,
-              currentInspectedTx,
-            },
-          });
-
-          const currentDelay = getDelay();
-          if (currentDelay > 0) {
-            await waitWithPause(currentDelay);
+        if (validations.matchAmountA1A3) {
+          // Primero buscar coincidencia exacta
+          for (const cand of exactCandidates) {
+            if (cand.expected <= 0) continue;
+            if (Math.abs(tx.amount - cand.expected) <= options.amountTolerance) {
+              matchedCandidate = cand;
+              isTipMatch = false;
+              break;
+            }
           }
-          break;
+          // Si no hubo coincidencia exacta y se permiten propinas, buscar en propinas
+          if (!matchedCandidate && useTips) {
+            for (const cand of tipCandidates) {
+              if (cand.expected <= 0) continue;
+              if (Math.abs(tx.amount - cand.expected) <= options.amountTolerance) {
+                matchedCandidate = cand;
+                isTipMatch = true;
+                break;
+              }
+            }
+          }
+          if (!matchedCandidate && tx.amount > 0) {
+            continue;
+          }
+        } else {
+          matchedCandidate = exactCandidates[0];
+        }
+
+        if (matchedCandidate || (tx.amount === 0 && timeMatches) || (!validations.matchAmountA1A3)) {
+          let score = (isTipMatch ? 300 : 0) + Math.abs(diffSeconds - 75);
+          if (terminalMatches) score -= 400;
+
+          if (!bestExpiredCandidate || score < bestExpiredCandidate.score) {
+            bestExpiredCandidate = {
+              expiredIndex: m,
+              exp,
+              cand: matchedCandidate || exactCandidates[0],
+              diffSeconds,
+              score,
+            };
+          }
+        }
+      }
+
+      if (bestExpiredCandidate) {
+        const { expiredIndex, exp, cand, diffSeconds } = bestExpiredCandidate;
+        usedExpiredIndices.add(expiredIndex);
+        foundExpired = true;
+
+        possibleExpiredCharges.forEach((p) => {
+          p.isLatestMatch = false;
+        });
+
+        const diffMinutes = Math.round((diffSeconds / 60) * 10) / 10;
+        const newExpCharge: PossibleExpiredChargeResult = {
+          id: `exp_charge_${tx.rowNumber}_${exp.rowNumber}`,
+          transaction: tx,
+          expiredOrder: exp,
+          marginType: cand.type,
+          marginLabel: cand.label,
+          calculatedExpectedAmount: cand.expected,
+          timeDiffSeconds: diffSeconds,
+          timeDiffFormatted: `+${diffMinutes} min (${diffSeconds}s)`,
+          horaArchivo1: tx.timeStr,
+          horaArchivo3: exp.timeStr,
+          montoArchivo1: tx.amount,
+          montoArchivo2Total: 0,
+          montoArchivo3Total: exp.totalAmount > 0 ? exp.totalAmount : exp.baseAmount,
+          montoArchivo3Base: exp.baseAmount,
+          storeIdArchivo1: tx.storeId,
+          terminalSerialArchivo2: tx.terminalSerial || (tx.storeId ? storeToSerialMap.get(tx.storeId.trim().toUpperCase()) : '') || '—',
+          terminalSerialArchivo3: exp.terminalSerial || '—',
+          storeIdArchivo3: exp.storeId || '—',
+          terminalMatchConfirmed: Boolean(
+            exp.terminalSerial && (
+              tx.terminalSerial === exp.terminalSerial ||
+              (tx.storeId && exp.storeId && storeIdsMatch(tx.storeId, exp.storeId))
+            )
+          ),
+          concesionArchivo3: exp.concession,
+          codigoArchivo3: exp.code,
+          vendedorArchivo3: exp.seller,
+          terminacionTarjetaArchivo1: tx.cardEnding,
+          codigoAutorizacionArchivo1: tx.authCode,
+          estatusIArchivo1: tx.statusI,
+          estatusLArchivo1: tx.statusL,
+          isLatestMatch: true,
+        };
+        possibleExpiredCharges.push(newExpCharge);
+
+        const progressPercent = Math.round(60 + ((k + 1) / unmatchedApprovedTransactions.length) * 38);
+        onProgress({
+          matchedWithOrders: [...matchedWithOrders],
+          unmatchedApprovedTransactions: [...unmatchedApprovedTransactions],
+          possibleExpiredCharges: [...possibleExpiredCharges],
+          activeStoreIdsMap,
+          summary: buildSummary(matchedWithOrders, unmatchedApprovedTransactions, possibleExpiredCharges),
+          progressState: {
+            isStreaming: true,
+            phase: 'matching_expired',
+            phaseDescription: `Cotejando restantes con Órdenes Expiradas (${k + 1} de ${unmatchedApprovedTransactions.length})...`,
+            progressPercent,
+            totalTransactionsToProcess: unmatchedApprovedTransactions.length,
+            currentProcessedIndex: k + 1,
+            matchedCountLive: matchedWithOrders.length,
+            expiredMatchesCountLive: possibleExpiredCharges.length,
+            lastMatchedMessage: `¡Posible Expirada Detectada!: ${exp.concession} • $${tx.amount.toFixed(2)} (${newExpCharge.marginLabel})`,
+            currentBatchItemText: `TX Renglón ${tx.rowNumber} • Hora ${tx.timeStr}`,
+            currentInspectedTx,
+          },
+        });
+
+        const currentDelay = getDelay();
+        if (currentDelay > 0) {
+          await waitWithPause(currentDelay);
         }
       }
 
@@ -1123,11 +1631,14 @@ export function exportPossibleExpiredChargesToExcel(
     'Aumento / Margen Detectado (Posible Propina)': item.marginLabel,
     'Store ID (Archivo 1 SPIN Col P)': item.storeIdArchivo1,
     'No. Serie Terminal (Archivo 2 Col S)': item.terminalSerialArchivo2 || '—',
+    'No. Serie Terminal Asignada Archivo 3 (Col B vs D & E vs F)': item.terminalSerialArchivo3 || '—',
+    'Store ID Archivo 3': item.storeIdArchivo3 || '—',
+    'Cruce Terminal Huérfana': item.terminalMatchConfirmed ? 'Confirmado' : item.terminalSerialArchivo3 ? 'Asignada' : 'Sin asignar',
     'Concesión (Archivo 3 Expiradas Col B)': item.concesionArchivo3,
     'Código (Archivo 3 Expiradas Col C)': item.codigoArchivo3,
     'Vendedor (Archivo 3 Expiradas Col E)': item.vendedorArchivo3,
     'Terminación Tarjeta (Archivo 1 SPIN Col S)': item.terminacionTarjetaArchivo1,
-    'Código Autorización (Archivo 1 SPIN Col Y)': item.codigoAutorizacionArchivo1,
+    'Código Autorización (Archivo 1 SPIN Col Y/Z)': item.codigoAutorizacionArchivo1,
     'Estatus Col I (Archivo 1 SPIN)': item.estatusIArchivo1,
     'Estatus Col L (Archivo 1 SPIN)': item.estatusLArchivo1,
   }));
@@ -1145,6 +1656,9 @@ export function exportPossibleExpiredChargesToExcel(
     { wch: 24 }, // Margen
     { wch: 20 }, // Store ID
     { wch: 24 }, // No. Serie Terminal
+    { wch: 26 }, // Terminal Asignada A3
+    { wch: 18 }, // Store ID A3
+    { wch: 22 }, // Cruce Terminal
     { wch: 24 }, // Concesión
     { wch: 16 }, // Código
     { wch: 24 }, // Vendedor
@@ -1167,7 +1681,7 @@ export function exportPossibleExpiredChargesToExcel(
 /**
  * Generates and downloads the Excel report: APROBADAS RESTANTES
  * Using the EXACT SAME format and columns as POSIBLES EXPIRADAS CON COBRO,
- * including No. Serie de la Terminal del Archivo 2 Columna S.
+ * including No. Serie de la Terminal del Archivo 2 Columna S y Terminal Asignada a Archivo 3.
  */
 export function exportUnmatchedApprovedToExcel(
   unmatchedList: TransactionRecord[],
@@ -1193,11 +1707,14 @@ export function exportUnmatchedApprovedToExcel(
       'Aumento / Margen Detectado (Posible Propina)': match ? match.marginLabel : 'Sin Coincidencia en A3',
       'Store ID (Archivo 1 SPIN Col P)': tx.storeId,
       'No. Serie Terminal (Archivo 2 Col S)': terminalSerial,
+      'No. Serie Terminal Asignada Archivo 3 (Col B vs D & E vs F)': match?.terminalSerialArchivo3 || '—',
+      'Store ID Archivo 3': match?.storeIdArchivo3 || '—',
+      'Cruce Terminal Huérfana': match?.terminalMatchConfirmed ? 'Confirmado' : match?.terminalSerialArchivo3 ? 'Asignada' : 'Sin asignar',
       'Concesión (Archivo 3 Expiradas Col B)': match ? match.concesionArchivo3 : '—',
       'Código (Archivo 3 Expiradas Col C)': match ? match.codigoArchivo3 : '—',
       'Vendedor (Archivo 3 Expiradas Col E)': match ? match.vendedorArchivo3 : '—',
       'Terminación Tarjeta (Archivo 1 SPIN Col S)': tx.cardEnding,
-      'Código Autorización (Archivo 1 SPIN Col Y)': tx.authCode,
+      'Código Autorización (Archivo 1 SPIN Col Y/Z)': tx.authCode,
       'Estatus Col I (Archivo 1 SPIN)': tx.statusI,
       'Estatus Col L (Archivo 1 SPIN)': tx.statusL,
     };
@@ -1215,6 +1732,9 @@ export function exportUnmatchedApprovedToExcel(
     { wch: 24 }, // Margen
     { wch: 20 }, // Store ID
     { wch: 24 }, // No. Serie Terminal
+    { wch: 26 }, // Terminal Asignada A3
+    { wch: 18 }, // Store ID A3
+    { wch: 22 }, // Cruce Terminal
     { wch: 24 }, // Concesión
     { wch: 16 }, // Código
     { wch: 24 }, // Vendedor
@@ -1270,66 +1790,77 @@ export function getSampleRawRows(): {
   f1Header[15] = 'Store ID (P)';
   f1Header[18] = 'Terminación Tarjeta (S)';
   f1Header[24] = 'Código Autorización (Y)';
+  f1Header[25] = 'Código Autorización (Z)';
   f1Rows.push(f1Header);
 
   // Row 13: Matches Order 1
   const row1 = new Array(26).fill('');
   row1[0] = 'TX-1001';
   row1[3] = '14:02:15';
+  row1[4] = 450.0;
   row1[5] = 450.0;
   row1[8] = 'Aprobada';
   row1[11] = 'Aprobada';
   row1[15] = 'STR-010';
   row1[18] = '4589';
   row1[24] = '948201';
+  row1[25] = '948201';
   f1Rows.push(row1);
 
   // Row 14: Matches Order 2
   const row2 = new Array(26).fill('');
   row2[0] = 'TX-1002';
   row2[3] = '14:15:40';
+  row2[4] = 280.0;
   row2[5] = 280.0;
   row2[8] = 'Aprobada';
   row2[11] = 'Aprobada';
   row2[15] = 'STR-020';
   row2[18] = '7712';
   row2[24] = '104859';
+  row2[25] = '104859';
   f1Rows.push(row2);
 
   // Row 15: Matches Expired Order 1 (+10% on $500 -> $550)
   const row3 = new Array(26).fill('');
   row3[0] = 'TX-1003';
   row3[3] = '14:32:10';
+  row3[4] = 550.0;
   row3[5] = 550.0;
   row3[8] = 'Aprobada';
   row3[11] = 'Aprobada';
   row3[15] = 'STR-010';
   row3[18] = '9921';
   row3[24] = '662019';
+  row3[25] = '662019';
   f1Rows.push(row3);
 
   // Row 16: Matches Expired Order 2 (+15% on $300 -> $345)
   const row4 = new Array(26).fill('');
   row4[0] = 'TX-1004';
   row4[3] = '14:48:25';
+  row4[4] = 345.0;
   row4[5] = 345.0;
   row4[8] = 'Aprobada';
   row4[11] = 'Aprobada';
   row4[15] = 'STR-020';
   row4[18] = '3341';
   row4[24] = '773012';
+  row4[25] = '773012';
   f1Rows.push(row4);
 
   // Row 17: Rechazada
   const row5 = new Array(26).fill('');
   row5[0] = 'TX-1005';
   row5[3] = '14:52:00';
+  row5[4] = 120.0;
   row5[5] = 120.0;
   row5[8] = 'Rechazada';
   row5[11] = 'Rechazada';
   row5[15] = 'STR-010';
   row5[18] = '1122';
   row5[24] = '000000';
+  row5[25] = '000000';
   f1Rows.push(row5);
 
   // 3. File 2: Generated Orders (starts row 5)
@@ -1339,6 +1870,9 @@ export function getSampleRawRows(): {
   f2Rows.push(['Turno: Vespertino']);
   const f2Header = new Array(20).fill('');
   f2Header[0] = 'Fecha Venta (A)';
+  f2Header[3] = 'Concesión (D)';
+  f2Header[5] = 'Vendedor (F)';
+  f2Header[10] = 'Monto Total (K)';
   f2Header[12] = 'No. Tarjeta (M)';
   f2Header[17] = 'Código Aut. (R)';
   f2Header[18] = 'No. Terminal (S)';
@@ -1346,6 +1880,9 @@ export function getSampleRawRows(): {
 
   const o1 = new Array(20).fill('');
   o1[0] = '2026-10-19 14:00:30';
+  o1[3] = 'Bebidas & Cervezas Corona 1';
+  o1[5] = 'Carlos Mendoza (Cajero 04)';
+  o1[10] = 450.0;
   o1[12] = '************4589';
   o1[17] = '948201';
   o1[18] = 'SN-POS-8001';
@@ -1353,6 +1890,9 @@ export function getSampleRawRows(): {
 
   const o2 = new Array(20).fill('');
   o2[0] = '2026-10-19 14:13:20';
+  o2[3] = 'Tacos El Campeón Secc B';
+  o2[5] = 'Andrea Rivera (Cajero 11)';
+  o2[10] = 280.0;
   o2[12] = '4152313298717712';
   o2[17] = '104859';
   o2[18] = 'SN-POS-8003';

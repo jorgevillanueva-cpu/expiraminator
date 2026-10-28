@@ -55,6 +55,19 @@ export const ComparisonFlowDiagramModal: React.FC<ComparisonFlowDiagramModalProp
         {/* Scrollable Diagram Content */}
         <div className="flex-1 overflow-y-auto p-6 sm:p-8 space-y-8 bg-slate-50 text-slate-900 text-xs">
           
+          {/* Configurable validations note */}
+          <div className="p-4 rounded-2xl bg-indigo-50/80 border border-indigo-200 text-indigo-950 flex items-start gap-3">
+            <Sparkles className="w-5 h-5 text-indigo-600 shrink-0 mt-0.5" />
+            <div>
+              <p className="font-extrabold text-indigo-900 text-xs">
+                Todas las validaciones y comparaciones son configurables
+              </p>
+              <p className="text-[11.5px] text-indigo-800 leading-relaxed font-medium mt-0.5">
+                Puedes activar o desactivar cualquiera de las reglas descritas a continuación (por ejemplo, omitir el cotejo de Store ID, la verificación de terminal física, las tolerancias de tiempo o los filtros de efectivo) en el panel de <strong>&quot;Reglas y Validaciones de Cotejo&quot;</strong>.
+              </p>
+            </div>
+          </div>
+
           {/* STEP 0: Terminals Mapping & Verification */}
           <div className="p-5 rounded-3xl bg-white border border-slate-200 shadow-xs space-y-4">
             <div className="flex items-center justify-between flex-wrap gap-2">
@@ -195,7 +208,7 @@ export const ComparisonFlowDiagramModal: React.FC<ComparisonFlowDiagramModalProp
                 </div>
               </div>
               <p className="text-slate-400 text-[10.5px] pt-1">
-                * Archivo 2 descarta filas 1 al 4 y órdenes en efectivo con '-'. <strong>Monto Total de orden está en Columna K</strong>.
+                * Archivo 2 descarta filas 1 al 4, órdenes en efectivo con '-' y <strong>todo renglón con Columna S vacía</strong>. Monto Total en Columna K.
               </p>
             </div>
 
@@ -226,6 +239,58 @@ export const ComparisonFlowDiagramModal: React.FC<ComparisonFlowDiagramModalProp
             <ArrowDown className="w-6 h-6 text-slate-400" />
           </div>
 
+          {/* STEP 2.5: Asignación de Terminales a Archivo 3 (Concesión y Vendedor) */}
+          <div className="p-5 rounded-3xl bg-white border border-slate-200 shadow-xs space-y-4">
+            <div className="flex items-center justify-between flex-wrap gap-2">
+              <div className="flex items-center gap-2.5">
+                <span className="w-7 h-7 rounded-lg bg-indigo-600 text-white font-mono font-bold flex items-center justify-center text-xs">
+                  2.5
+                </span>
+                <h3 className="font-extrabold text-sm text-slate-900 uppercase font-mono tracking-wider">
+                  Paso 2.5: Asignación de Terminales a Archivo 3 (Previo a Aprobadas Restantes)
+                </h3>
+              </div>
+              <span className="px-2.5 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-200 font-mono text-[11px] font-bold">
+                A3 Col B vs A2 Col D • A3 Col E vs A2 Col F
+              </span>
+            </div>
+
+            <p className="text-slate-600 text-xs leading-relaxed">
+              Antes de separar las Aprobadas Restantes, el sistema realiza una comparación preliminar entre <strong>Archivo 3 (Expiradas)</strong> y <strong>Archivo 2 (Órdenes Yoshi)</strong>:
+            </p>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3 font-mono text-xs">
+              <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200 space-y-1">
+                <span className="text-[10px] uppercase font-bold text-slate-400">Comparación 1</span>
+                <p className="font-bold text-slate-900">Concesión / Área</p>
+                <p className="text-[11px] text-indigo-700 font-bold">A3 Col B == A2 Col D</p>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200 space-y-1">
+                <span className="text-[10px] uppercase font-bold text-slate-400">Comparación 2</span>
+                <p className="font-bold text-slate-900">Vendedor / Cajero</p>
+                <p className="text-[11px] text-indigo-700 font-bold">A3 Col E == A2 Col F</p>
+              </div>
+              <div className="p-3.5 rounded-2xl bg-emerald-50 border border-emerald-200 space-y-1">
+                <span className="text-[10px] uppercase font-bold text-emerald-700">Asignación al Coincidir</span>
+                <p className="font-bold text-emerald-950">Terminal Asignada</p>
+                <p className="text-[11px] text-emerald-800 font-bold">A3 recibe Terminal de A2 Col S</p>
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-amber-50 border border-amber-200 text-amber-950 text-xs leading-relaxed space-y-1.5">
+              <p>
+                <strong>Regla Estricta de Asignación:</strong> Si coinciden las columnas B vs D y E vs F pero el Archivo 2 <strong>no tiene valor en la Columna S</strong> (vacía, nula o con &quot;-&quot; por cobro en efectivo), <strong>NO se le asigna terminal</strong> y se descarta esa coincidencia (sin asignaciones al azar).
+              </p>
+              <p className="text-[11px] text-amber-900">
+                <strong>Exclusión de Cobros en Efectivo:</strong> Todo renglón con &quot;Efectivo&quot; o con Columna S vacía/&quot;-&quot; en Archivo 2 se descarta automáticamente. Si una concesión o vendedor solo operó en efectivo, sus órdenes expiradas en Archivo 3 nunca recibirán terminal y <strong>quedan excluidas del Paso 3</strong> (no pueden tener cobros huérfanos con tarjeta).
+              </p>
+            </div>
+          </div>
+
+          <div className="flex justify-center">
+            <ArrowDown className="w-6 h-6 text-slate-400" />
+          </div>
+
           {/* STEP 3: Cruce con Archivo 3 (Expiradas y Propinas) */}
           <div className="p-5 rounded-3xl bg-white border border-slate-200 shadow-xs space-y-4">
             <div className="flex items-center justify-between flex-wrap gap-2">
@@ -234,16 +299,16 @@ export const ComparisonFlowDiagramModal: React.FC<ComparisonFlowDiagramModalProp
                   3
                 </span>
                 <h3 className="font-extrabold text-sm text-slate-900 uppercase font-mono tracking-wider">
-                  Paso 3: Cruce de Aprobadas Restantes vs Archivo 3 (Órdenes Expiradas)
+                  Paso 3: Cruce Final de Aprobadas Restantes vs Archivo 3 (Órdenes Expiradas)
                 </h3>
               </div>
               <span className="px-2.5 py-0.5 rounded-full bg-rose-50 text-rose-700 border border-rose-200 font-mono text-[11px] font-bold">
-                Detección con Posible Propina
+                Validación de Terminal + Ventana de Tiempo + Monto
               </span>
             </div>
 
             <p className="text-slate-600 text-xs leading-relaxed">
-              Las <strong>Aprobadas Restantes</strong> se cotejan contra las <strong>Órdenes Expiradas (Archivo 3, inicia en fila 5)</strong> evaluando coincidencia de hora (margen superior +1 a +3 min) y el monto cobrado contra la Columna H (o G) considerando los incrementos de <strong>posible propina</strong>:
+              Las <strong>Aprobadas Restantes</strong> se cotejan <strong>únicamente contra Órdenes Expiradas que tengan terminal y Store ID confirmados</strong> (las órdenes sin terminal o de cajeros con solo efectivo quedan excluidas). Deben pertenecer a la misma terminal / Store ID asignado en el Paso 2.5, coincidir en ventana de hora (margen +1 a +3 min), y evaluar el monto con la <strong>opción de utilizar o no el incremento del 5 al 20% (propina)</strong>:
             </p>
 
             <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 font-mono text-center">
@@ -278,10 +343,10 @@ export const ComparisonFlowDiagramModal: React.FC<ComparisonFlowDiagramModalProp
               <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
               <div>
                 <p className="font-extrabold text-xs">
-                  Hallazgo: Cobro No Correspondiente (Orden Expirada Cobrada al Cliente)
+                  Hallazgo: Cobro No Correspondiente (Pago Huérfano en Orden Expirada)
                 </p>
                 <p className="text-[11.5px] text-rose-900 mt-0.5">
-                  Si coincide en hora y monto (exacto o con porcentaje de posible propina), se detecta que el cliente fue cobrado por una orden que expiró en la terminal y nunca se le entregó, o que requiere aclaración con la concesión/vendedor.
+                  Si coincide en terminal asignada, hora y monto (exacto o con porcentaje de posible propina configurable), se localiza el pago huérfano legítimo donde el cliente fue cobrado por una orden que expiró en la terminal.
                 </p>
               </div>
             </div>

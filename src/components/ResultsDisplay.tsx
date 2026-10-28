@@ -16,6 +16,7 @@ import {
   ArrowRight,
   ShieldAlert,
   Workflow,
+  SlidersHorizontal,
 } from 'lucide-react';
 import {
   MatchedOrderResult,
@@ -24,10 +25,14 @@ import {
   TransactionRecord,
   ReconciliationProgressState,
   UnregisteredTerminalInfo,
+  ReconciliationValidationConfig,
+  DEFAULT_VALIDATION_CONFIG,
 } from '../types';
 import {
   exportPossibleExpiredChargesToExcel,
   exportUnmatchedApprovedToExcel,
+  getEffectiveValidations,
+  ReconciliationOptions,
 } from '../utils/reconciler';
 import { ComparisonFlowDiagramModal } from './ComparisonFlowDiagramModal';
 import { UnregisteredTerminalsAlert } from './UnregisteredTerminalsAlert';
@@ -45,6 +50,8 @@ interface ResultsDisplayProps {
   onRegisterTerminalSingle?: (serial: string, storeId: string) => Promise<void>;
   onRegisterTerminalBatch?: (items: Array<{ serialNumber: string; storeId: string }>) => Promise<void>;
   onGoToTerminalsTab?: () => void;
+  onOptionsClick?: () => void;
+  options?: ReconciliationOptions;
 }
 
 export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
@@ -60,6 +67,8 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
   onRegisterTerminalSingle,
   onRegisterTerminalBatch,
   onGoToTerminalsTab,
+  onOptionsClick,
+  options,
 }) => {
   const [subTab, setSubTab] = useState<'matched_orders' | 'unmatched_approved' | 'expired_charges' | 'terminals_mapped'>('matched_orders');
   const [searchQuery, setSearchQuery] = useState('');
@@ -132,6 +141,16 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
   // Pagination states for high-speed buttery smooth rendering (prevents browser lockups)
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
+
+  const effectiveValidations = React.useMemo(() => {
+    return options ? getEffectiveValidations(options) : DEFAULT_VALIDATION_CONFIG;
+  }, [options]);
+
+  const disabledValidationsCount = React.useMemo(() => {
+    return Object.keys(DEFAULT_VALIDATION_CONFIG).filter(
+      (k) => effectiveValidations[k as keyof ReconciliationValidationConfig] === false
+    ).length;
+  }, [effectiveValidations]);
 
   // Reset page when subTab, search, or filter changes
   React.useEffect(() => {
@@ -564,6 +583,30 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
               </button>
             )}
 
+            {onOptionsClick && (
+              <button
+                onClick={onOptionsClick}
+                className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold border shadow-2xs transition ${
+                  disabledValidationsCount > 0
+                    ? 'bg-amber-50 text-amber-900 border-amber-300 hover:bg-amber-100'
+                    : 'bg-white text-slate-700 border-slate-200 hover:bg-slate-50'
+                }`}
+                title="Configurar y activar o desactivar cualquiera de las reglas y validaciones de cotejo"
+              >
+                <SlidersHorizontal className="w-4 h-4 text-slate-600" />
+                <span>Reglas de Validación</span>
+                {disabledValidationsCount > 0 ? (
+                  <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-200 text-amber-900">
+                    {disabledValidationsCount} descat.
+                  </span>
+                ) : (
+                  <span className="px-1.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                    12/12
+                  </span>
+                )}
+              </button>
+            )}
+
             <button
               onClick={() => setShowDiagramModal(true)}
               className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold text-indigo-700 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 shadow-2xs transition"
@@ -884,7 +927,21 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                               </span>
                             )}
                           </td>
-                          <td className="py-3 px-3 text-emerald-700 font-bold">{tx.storeId}</td>
+                          <td className="py-3 px-3">
+                            <div className="text-emerald-700 font-bold">{tx.storeId}</div>
+                            {expiredMatch?.terminalSerialArchivo3 && expiredMatch.terminalSerialArchivo3 !== '—' ? (
+                              <div className="flex items-center gap-1 mt-0.5">
+                                <span className="px-1.5 py-0.2 rounded bg-indigo-50 text-indigo-700 border border-indigo-200 text-[10px] font-mono font-bold" title="Terminal asignada a Archivo 3 desde Archivo 2 Col S por Concesión y Vendedor">
+                                  A3: {expiredMatch.terminalSerialArchivo3}
+                                </span>
+                                {expiredMatch.terminalMatchConfirmed && (
+                                  <span className="text-[10px] text-emerald-600 font-bold" title="Pago huérfano localizado en la misma terminal">✓</span>
+                                )}
+                              </div>
+                            ) : (
+                              <div className="text-slate-400 text-[10px] font-mono">{tx.terminalSerial || '—'}</div>
+                            )}
+                          </td>
                           <td className="py-3 px-3 font-sans text-slate-800 font-medium max-w-[150px] truncate">
                             {expiredMatch ? expiredMatch.concesionArchivo3 : '—'}
                           </td>
@@ -942,7 +999,7 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                     <div className="text-amber-600 font-semibold">A3 Expirada (Col H)</div>
                   </th>
                   <th className="py-3 px-3">Margen Detectado</th>
-                  <th className="py-3 px-3">Store ID (P)</th>
+                  <th className="py-3 px-3">Store ID / Terminal</th>
                   <th className="py-3 px-3">Concesión (B)</th>
                   <th className="py-3 px-3">Código (C)</th>
                   <th className="py-3 px-3">Vendedor (E)</th>
@@ -1003,7 +1060,24 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
                           {item.marginLabel}
                         </span>
                       </td>
-                      <td className="py-3 px-3 text-emerald-700 font-bold">{item.storeIdArchivo1}</td>
+                      <td className="py-3 px-3">
+                        <div className="text-emerald-700 font-bold">{item.storeIdArchivo1}</div>
+                        {item.terminalSerialArchivo3 && item.terminalSerialArchivo3 !== '—' ? (
+                          <div className="flex items-center gap-1 mt-0.5">
+                            <span
+                              className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 border border-indigo-200 text-[10px] font-mono font-bold"
+                              title="Terminal física asignada a Archivo 3 desde Archivo 2 Col S por coincidencia Concesión (B/D) y Vendedor (E/F)"
+                            >
+                              POS: {item.terminalSerialArchivo3}
+                            </span>
+                            {item.terminalMatchConfirmed && (
+                              <span className="text-[10px] text-emerald-600 font-bold" title="Terminal y Store ID coinciden con la transacción bancaria (Pago huérfano confirmado)">✓</span>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="text-slate-400 text-[10px] italic">Sin terminal en A2</div>
+                        )}
+                      </td>
                       <td className="py-3 px-3 font-sans text-slate-800 font-medium max-w-[150px] truncate">
                         {item.concesionArchivo3}
                       </td>
@@ -1306,6 +1380,36 @@ export const ResultsDisplay: React.FC<ResultsDisplayProps> = ({
               <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
                 <span className="text-slate-500 text-[10px] uppercase font-mono font-bold">Store ID (Col P)</span>
                 <p className="text-xs font-bold text-indigo-700 font-mono">{selectedItem.storeIdArchivo1}</p>
+              </div>
+
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                <span className="text-slate-500 text-[10px] uppercase font-mono font-bold">Terminal Archivo 2 (Col S)</span>
+                <p className="text-xs font-bold text-slate-800 font-mono">
+                  {selectedItem.terminalSerialArchivo2 || '—'}
+                </p>
+              </div>
+
+              <div className="p-3 rounded-xl bg-indigo-50/70 border border-indigo-200">
+                <span className="text-indigo-800 text-[10px] uppercase font-mono font-bold">Terminal Asignada A3 (Col S)</span>
+                <p className="text-xs font-bold text-indigo-900 font-mono">
+                  {selectedItem.terminalSerialArchivo3 || '—'}
+                </p>
+                <span className="text-[10px] text-indigo-600 block mt-0.5">
+                  Vía Concesión (B/D) + Vendedor (E/F)
+                </span>
+              </div>
+
+              <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">
+                <span className="text-slate-500 text-[10px] uppercase font-mono font-bold">Validación Pago Huérfano</span>
+                <p className="text-xs font-bold font-mono">
+                  {selectedItem.terminalMatchConfirmed ? (
+                    <span className="text-emerald-700">✓ Confirmado (Misma Terminal / Store)</span>
+                  ) : selectedItem.terminalSerialArchivo3 && selectedItem.terminalSerialArchivo3 !== '—' ? (
+                    <span className="text-indigo-700">Terminal Asignada a Orden A3</span>
+                  ) : (
+                    <span className="text-slate-500">Sin terminal previa en A2</span>
+                  )}
+                </p>
               </div>
 
               <div className="p-3 rounded-xl bg-slate-50 border border-slate-200">

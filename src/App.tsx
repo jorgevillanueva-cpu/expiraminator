@@ -21,6 +21,8 @@ import {
   ReconciliationSummary,
   ReconciliationProgressState,
   UnregisteredTerminalInfo,
+  ReconciliationValidationConfig,
+  DEFAULT_VALIDATION_CONFIG,
 } from './types';
 import {
   getStoredTerminals,
@@ -29,6 +31,7 @@ import {
   SAMPLE_TERMINALS,
 } from './services/terminalService';
 import { UnregisteredTerminalsAlert } from './components/UnregisteredTerminalsAlert';
+import { ValidationSettingsModal } from './components/ValidationSettingsModal';
 import { testConnection } from './firebase';
 import {
   parseTransactionsFile,
@@ -38,6 +41,7 @@ import {
   countCashRowsInTransactionsFile,
   DEFAULT_OPTIONS,
   ReconciliationOptions,
+  getEffectiveValidations,
 } from './utils/reconciler';
 
 export default function App() {
@@ -60,6 +64,13 @@ export default function App() {
   // Options
   const [options, setOptions] = useState<ReconciliationOptions>(DEFAULT_OPTIONS);
   const [showOptionsModal, setShowOptionsModal] = useState(false);
+
+  const effectiveValidations = useMemo(() => getEffectiveValidations(options), [options]);
+  const disabledValidationsCount = useMemo(() => {
+    return Object.keys(DEFAULT_VALIDATION_CONFIG).filter(
+      (k) => effectiveValidations[k as keyof ReconciliationValidationConfig] === false
+    ).length;
+  }, [effectiveValidations]);
 
   // Error message
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -164,7 +175,7 @@ export default function App() {
       try {
         const cashRowsA1 = file1Rows ? countCashRowsInTransactionsFile(file1Rows) : 0;
         const transactions = parseTransactionsFile(file1Rows);
-        const generatedOrders = parseGeneratedOrdersFile(file2Rows);
+        const generatedOrders = parseGeneratedOrdersFile(file2Rows, options.validations);
         const expiredOrders = file3Rows ? parseExpiredOrdersFile(file3Rows) : [];
 
         if (transactions.length === 0 || generatedOrders.length === 0) {
@@ -505,10 +516,24 @@ export default function App() {
               <div className="flex items-center gap-3 shrink-0">
                 <button
                   onClick={() => setShowOptionsModal(true)}
-                  className="px-3.5 py-2 rounded-xl bg-slate-50 hover:bg-slate-100 text-slate-700 text-xs font-bold border border-slate-200 flex items-center gap-2 transition"
+                  className={`px-3.5 py-2 rounded-xl text-xs font-bold border flex items-center gap-2 transition ${
+                    disabledValidationsCount > 0
+                      ? 'bg-amber-50 text-amber-900 border-amber-300 hover:bg-amber-100 shadow-2xs'
+                      : 'bg-slate-50 hover:bg-slate-100 text-slate-700 border-slate-200'
+                  }`}
+                  title="Configurar tolerancias y activar o desactivar cualquiera de las validaciones de cotejo"
                 >
                   <SlidersHorizontal className="w-4 h-4 text-slate-500" />
-                  <span>Parámetros de Tolerancia</span>
+                  <span>Reglas y Validaciones de Cotejo</span>
+                  {disabledValidationsCount > 0 ? (
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-200 text-amber-900">
+                      {disabledValidationsCount} descat.
+                    </span>
+                  ) : (
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800">
+                      12/12 activas
+                    </span>
+                  )}
                 </button>
               </div>
             </div>
@@ -569,6 +594,8 @@ export default function App() {
                   onReset={handleReset}
                   isRealTimeActive={true}
                   progressState={progressState || undefined}
+                  onOptionsClick={() => setShowOptionsModal(true)}
+                  options={options}
                 />
               </div>
             )}
@@ -585,120 +612,13 @@ export default function App() {
         )}
       </main>
 
-      {/* Options Modal */}
-      {showOptionsModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-xs">
-          <div className="bg-white border border-slate-200 rounded-3xl w-full max-w-lg p-6 shadow-2xl space-y-4">
-            <div className="flex items-center justify-between">
-              <h3 className="text-base font-extrabold text-slate-900 flex items-center gap-2">
-                <SlidersHorizontal className="w-4 h-4 text-rose-600" />
-                <span>Configuración de Parámetros de Cotejo</span>
-              </h3>
-              <button
-                onClick={() => setShowOptionsModal(false)}
-                className="text-slate-400 hover:text-slate-700 p-1.5 rounded-lg hover:bg-slate-100 font-bold"
-              >
-                ✕
-              </button>
-            </div>
-
-            <p className="text-xs text-slate-500 font-medium">
-              Ajusta las tolerancias de tiempo y diferencias de monto para el cruce en tiempo real entre los tres archivos.
-            </p>
-
-            <div className="space-y-4 text-xs">
-              <div>
-                <label className="block text-slate-700 font-mono font-bold mb-1">
-                  Margen superior de tiempo máximo (minutos):
-                </label>
-                <div className="flex items-center gap-3">
-                  <input
-                    type="number"
-                    min={1}
-                    max={15}
-                    value={Math.round(options.maxTimeDiffSeconds / 60)}
-                    onChange={(e) =>
-                      setOptions((prev) => ({
-                        ...prev,
-                        maxTimeDiffSeconds: Math.max(1, parseInt(e.target.value, 10) || 3) * 60,
-                      }))
-                    }
-                    className="w-24 bg-white border border-slate-200 rounded-xl px-3 py-1.5 text-slate-900 font-mono shadow-2xs font-bold"
-                  />
-                  <span className="text-slate-500 font-medium">
-                    Por especificación: 1 a 3 minutos ({options.maxTimeDiffSeconds} segundos)
-                  </span>
-                </div>
-              </div>
-
-              <div>
-                <label className="block text-slate-700 font-mono font-bold mb-1">
-                  Margen superior de tiempo mínimo (segundos):
-                </label>
-                <input
-                  type="number"
-                  min={0}
-                  max={120}
-                  value={options.minTimeDiffSeconds}
-                  onChange={(e) =>
-                    setOptions((prev) => ({
-                      ...prev,
-                      minTimeDiffSeconds: Math.max(0, parseInt(e.target.value, 10) || 0),
-                    }))
-                  }
-                  className="w-24 bg-white border border-slate-200 rounded-xl px-3 py-1.5 text-slate-900 font-mono shadow-2xs font-bold"
-                />
-                <span className="text-slate-500 ml-2 font-medium">
-                  (0s permite coincidencia inmediata hasta 3 minutos)
-                </span>
-              </div>
-
-              <div>
-                <label className="block text-slate-700 font-mono font-bold mb-1">
-                  Tolerancia de redondeo de monto ($):
-                </label>
-                <input
-                  type="number"
-                  step="0.01"
-                  min={0}
-                  max={5}
-                  value={options.amountTolerance}
-                  onChange={(e) =>
-                    setOptions((prev) => ({
-                      ...prev,
-                      amountTolerance: parseFloat(e.target.value) || 0.99,
-                    }))
-                  }
-                  className="w-24 bg-white border border-slate-200 rounded-xl px-3 py-1.5 text-slate-900 font-mono shadow-2xs font-bold"
-                />
-                <span className="text-slate-500 ml-2 font-medium">
-                  Tolerancia de centavos para evaluar +5%, +10%, +15%, +20% o Total
-                </span>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-end gap-3 pt-3 border-t border-slate-100">
-              <button
-                type="button"
-                onClick={() => {
-                  setOptions(DEFAULT_OPTIONS);
-                  setShowOptionsModal(false);
-                }}
-                className="px-3.5 py-2 rounded-xl text-xs text-slate-500 hover:text-slate-800 hover:bg-slate-100 font-semibold"
-              >
-                Restablecer por defecto
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowOptionsModal(false)}
-                className="px-4 py-2 rounded-xl text-xs bg-rose-600 hover:bg-rose-700 text-white font-bold shadow-xs transition"
-              >
-                Guardar Parámetros
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      {/* Reglas y Validaciones de Cotejo Modal */}
+      <ValidationSettingsModal
+        isOpen={showOptionsModal}
+        onClose={() => setShowOptionsModal(false)}
+        options={options}
+        onOptionsChange={setOptions}
+      />
 
       {/* Footer (Doofenshmirtz Malvados y Asociados con imagen1) */}
       <footer className="border-t border-slate-200 bg-white py-6 text-center text-xs text-slate-700 font-medium">
